@@ -21,5 +21,6 @@ mcp:
       args: [
           "-y",
           "@modelcontextprotocol/server-filesystem",
-          "FILESYSTEM_PATH"]
+          "/Users/hanieh/Desktop",
+          "/Users/hanieh/Downloads"]
       description: "Access Filesystem operations"

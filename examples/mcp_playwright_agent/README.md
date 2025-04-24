@@ -38,5 +38,5 @@ The tool uses two MCP servers:
    - Filesystem paths
 
 ## Usage
-uv run main.py --criteria "Python developers in San Francisco" --max-results 7 --output "/desktop/JOB.csv"
+uv run main.py --criteria "Python developers in San Francisco" --max-results 7 --output "/desktop/hanieh.csv"
 Run the script from the command line using: uv run main.py --criteria "THE POSITION YOU ARE LOOKING FOR" --max-results NUMBER OF MAX RESULTS --output "LOCATION OF SAVED RESULTS"
