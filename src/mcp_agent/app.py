@@ -21,6 +21,7 @@ from mcp_agent.executor.task_registry import ActivityRegistry
 from mcp_agent.executor.workflow_signal import SignalWaitCallback
 from mcp_agent.executor.workflow_task import GlobalWorkflowTaskRegistry
 from mcp_agent.human_input.types import HumanInputCallback
+from mcp_agent.elicitation.types import ElicitationCallback
 from mcp_agent.tracing.telemetry import get_tracer
 from mcp_agent.utils.common import unwrap
 from mcp_agent.workflows.llm.llm_selector import ModelSelector
@@ -58,6 +59,7 @@ class MCPApp:
         description: str | None = None,
         settings: Optional[Settings] | str = None,
         human_input_callback: Optional[HumanInputCallback] = None,
+        elicitation_callback: Optional[ElicitationCallback] = None,
         signal_notification: Optional[SignalWaitCallback] = None,
         upstream_session: Optional["ServerSession"] = None,
         model_selector: ModelSelector = None,
@@ -97,6 +99,7 @@ class MCPApp:
         self._registered_global_workflow_tasks = set()
 
         self._human_input_callback = human_input_callback
+        self._elicitation_callback = elicitation_callback
         self._signal_notification = signal_notification
         self._upstream_session = upstream_session
         self._model_selector = model_selector
@@ -106,6 +109,7 @@ class MCPApp:
         self._logger = None
         self._context: Optional[Context] = None
         self._initialized = False
+        self._tracer_provider = None
 
         try:
             # Set event loop policy for Windows
@@ -181,8 +185,13 @@ class MCPApp:
             store_globally=True,
         )
 
+        # Store the app-specific tracer provider
+        if self._context.tracing_enabled and self._context.tracing_config:
+            self._tracer_provider = self._context.tracing_config._tracer_provider
+
         # Set the properties that were passed in the constructor
         self._context.human_input_handler = self._human_input_callback
+        self._context.elicitation_handler = self._elicitation_callback
         self._context.signal_notification = self._signal_notification
         self._context.upstream_session = self._upstream_session
         self._context.model_selector = self._model_selector
@@ -218,13 +227,24 @@ class MCPApp:
             },
         )
 
+        # Force flush traces before cleanup
+        if self._context and self._context.tracing_config:
+            await self._context.tracing_config.flush()
+
         try:
-            await cleanup_context()
+            # Don't shutdown OTEL completely, just cleanup app-specific resources
+            await cleanup_context(shutdown_logger=False)
         except asyncio.CancelledError:
             self.logger.debug("Cleanup cancelled during shutdown")
 
+        # Shutdown the tracer provider to stop background threads
+        # This prevents dangling span exports after cleanup
+        if self._context and self._context.tracing_config:
+            self._context.tracing_config.shutdown()
+
         self._context = None
         self._initialized = False
+        self._tracer_provider = None
 
     @asynccontextmanager
     async def run(self):

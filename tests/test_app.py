@@ -26,6 +26,9 @@ class TestMCPApp:
         mock_context.tracer = (
             MagicMock()
         )  # Add tracer attribute for tests that require it
+        mock_context.tracing_enabled = False
+        mock_context.upstream_session = None
+        mock_context.tracing_config = None
         return mock_context
 
     @pytest.fixture

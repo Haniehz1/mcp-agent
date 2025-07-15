@@ -375,7 +375,14 @@ class EvaluatorOptimizerLLM(AugmentedLLM[MessageParamT, MessageT]):
                 request_params=request_params,
             )
 
-            res = "\n".join(self.optimizer_llm.message_str(r) for r in response)
+            final_text: List[str] = []
+            for r in response:
+                message_str = self.optimizer_llm.message_str(r, content_only=True)
+                if message_str:  # Only include non-empty messages
+                    final_text.append(message_str)
+
+            res = "\n".join(final_text)
+
             span.set_attribute("response", res)
             return res
 

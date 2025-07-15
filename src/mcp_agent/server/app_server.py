@@ -178,7 +178,8 @@ def create_mcp_server_for_app(app: MCPApp) -> FastMCP:
         ctx: MCPContext,
         workflow_name: str,
         run_parameters: Dict[str, Any] | None = None,
-    ) -> str:
+        **kwargs: Any,
+    ) -> Dict[str, str]:
         """
         Run a workflow with the given name.
 
@@ -186,12 +187,13 @@ def create_mcp_server_for_app(app: MCPApp) -> FastMCP:
             workflow_name: The name of the workflow to run.
             run_parameters: Arguments to pass to the workflow run.
                 workflows/list method will return the run_parameters schema for each workflow.
+            kwargs: Ignore, for internal use only.
 
         Returns:
-            The run ID of the started workflow run, which can be passed to
+            A dict with workflow_id and run_id for the started workflow run, can be passed to
             workflows/get_status, workflows/resume, and workflows/cancel.
         """
-        return await _workflow_run(ctx, workflow_name, run_parameters)
+        return await _workflow_run(ctx, workflow_name, run_parameters, **kwargs)
 
     @mcp.tool(name="workflows-get_status")
     async def get_workflow_status(
@@ -327,7 +329,7 @@ def create_workflow_specific_tools(
     @mcp.tool(
         name=f"workflows-{workflow_name}-run",
         description=f"""
-        Run the '{workflow_name}' workflow and get a run ID back.
+        Run the '{workflow_name}' workflow and get a dict with workflow_id and run_id back.
         Workflow Description: {workflow_cls.__doc__}
 
         {run_fn_tool.description}
@@ -341,7 +343,7 @@ def create_workflow_specific_tools(
     async def run(
         ctx: MCPContext,
         run_parameters: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, str]:
         return await _workflow_run(ctx, workflow_name, run_parameters)
 
     @mcp.tool(
@@ -354,7 +356,7 @@ def create_workflow_specific_tools(
         """,
     )
     async def get_status(ctx: MCPContext, run_id: str) -> Dict[str, Any]:
-        return await _workflow_status(ctx, run_id=run_id, workflow_id=workflow_name)
+        return await _workflow_status(ctx, run_id=run_id, workflow_name=workflow_name)
 
 
 # endregion
@@ -404,48 +406,65 @@ def _get_server_descriptions_as_string(
 
 async def _workflow_run(
     ctx: MCPContext,
-    workflow_id: str,
+    workflow_name: str,
     run_parameters: Dict[str, Any] | None = None,
-) -> str:
+    **kwargs: Any,
+) -> Dict[str, str]:
     server_context: ServerContext = ctx.request_context.lifespan_context
 
-    if workflow_id not in server_context.workflows:
-        raise ToolError(f"Workflow '{workflow_id}' not found.")
+    if workflow_name not in server_context.workflows:
+        raise ToolError(f"Workflow '{workflow_name}' not found.")
 
     # Get the workflow class
-    workflow_cls = server_context.workflows[workflow_id]
+    workflow_cls = server_context.workflows[workflow_name]
 
     # Create and initialize the workflow instance using the factory method
     try:
         # Create workflow instance
         workflow = await workflow_cls.create(
-            name=workflow_id, context=server_context.context
+            name=workflow_name, context=server_context.context
         )
 
         run_parameters = run_parameters or {}
 
+        # Pass workflow_id and task_queue as special system parameters
+        workflow_id = kwargs.get("workflow_id", None)
+        task_queue = kwargs.get("task_queue", None)
+
+        # Using __mcp_agent_ prefix to avoid conflicts with user parameters
+        if workflow_id:
+            run_parameters["__mcp_agent_workflow_id"] = workflow_id
+        if task_queue:
+            run_parameters["__mcp_agent_task_queue"] = task_queue
+
         # Run the workflow asynchronously and get its ID
-        run_id = await workflow.run_async(**run_parameters)
+        execution = await workflow.run_async(**run_parameters)
 
         logger.info(
-            f"Workflow {workflow_id} started with run ID {run_id}. Parameters: {run_parameters}"
+            f"Workflow {workflow_name} started with workflow ID {execution.workflow_id} and run ID {execution.run_id}. Parameters: {run_parameters}"
         )
 
-        return run_id
+        return {
+            "workflow_id": execution.workflow_id,
+            "run_id": execution.run_id,
+        }
 
     except Exception as e:
-        logger.error(f"Error creating workflow {workflow_id}: {str(e)}")
-        raise ToolError(f"Error creating workflow {workflow_id}: {str(e)}") from e
+        logger.error(f"Error creating workflow {workflow_name}: {str(e)}")
+        raise ToolError(f"Error creating workflow {workflow_name}: {str(e)}") from e
 
 
 async def _workflow_status(
-    ctx: MCPContext, run_id: str, workflow_id: str | None = None
+    ctx: MCPContext, run_id: str, workflow_name: str | None = None
 ) -> Dict[str, Any]:
     server_context: ServerContext = ctx.request_context.lifespan_context
     workflow_registry: WorkflowRegistry = server_context.workflow_registry
 
     if not workflow_registry:
         raise ToolError("Workflow registry not found for MCPApp Server.")
+
+    workflow = await workflow_registry.get_workflow(run_id)
+    workflow_id = workflow.id if workflow and workflow.id else workflow_name
 
     status = await workflow_registry.get_workflow_status(
         run_id=run_id, workflow_id=workflow_id

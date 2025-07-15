@@ -77,7 +77,6 @@ uv run console_agent.py [URL]
 - "Navigate to the pricing page"
 - "Extract the main headings from this article"
 - "Take a screenshot of the current page"
-  <<<<<<< HEAD
 
 ## How It Works
 
@@ -97,5 +96,4 @@ The app maintains a continuous browser session, allowing you to:
 
 - Make sure Node.js and npm are properly installed
 - Check that your OpenAI API key is correctly configured in `mcp_agent.secrets.yaml`
-- # If you encounter issues with the Puppeteer server, ensure you have a compatible browser installed
-  > > > > > > > main
+- If you encounter issues with the Puppeteer server, ensure you have a compatible browser installed

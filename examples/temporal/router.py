@@ -71,7 +71,7 @@ class RouterWorkflow(Workflow[str]):
         )
 
         reasoning_agent = Agent(
-            name="writer",
+            name="reasoner",
             instruction="""You are a generalist with knowledge about a vast
             breadth of subjects. You are tasked with analyzing and reasoning over
             the user's query and providing a thoughtful response.""",

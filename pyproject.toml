@@ -1,6 +1,6 @@
 [project]
 name = "mcp-agent"
-version = "0.0.23"
+version = "0.1.7"
 description = "Build effective agents with Model Context Protocol (MCP) using simple, composable patterns."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -30,7 +30,7 @@ dependencies = [
     "websockets>=12.0",
     "opentelemetry-instrumentation-openai>=0.39.3",
     "opentelemetry-instrumentation-anthropic>=0.39.3",
-    "mcp>=1.9.0",
+    "mcp>=1.10.1",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +40,16 @@ temporal = [
 anthropic = [
     "anthropic>=0.48.0",
 ]
+
+anthropic_bedrock = [
+    "anthropic[bedrock]>=0.52.0",
+]
+
+anthropic_vertex = [
+    "anthropic[vertex]>=0.52.0",
+    "google-cloud-aiplatform>=1.101.0",
+]
+
 bedrock = [
     "boto3>=1.37.23"
 ]
@@ -55,6 +65,12 @@ google = [
 ]
 cohere = [
     "cohere>=5.13.4",
+]
+langchain = [
+    "langchain-core>=0.3.64",
+]
+crewai = [
+    "crewai>=0.126.0",
 ]
 
 [build-system]

@@ -119,6 +119,44 @@ class TestBedrockAugmentedLLM:
             ],
         }
 
+    @staticmethod
+    def create_multiple_tool_use_response(
+        tool_uses, text_prefix=None, stop_reason="tool_use", usage=None
+    ):
+        """
+        Creates a response with multiple tool uses for testing.
+        """
+        content = []
+        if text_prefix:
+            content.append({"text": text_prefix})
+
+        for tool_use in tool_uses:
+            content.append(
+                {
+                    "toolUse": {
+                        "name": tool_use["name"],
+                        "input": tool_use.get("input", {}),
+                        "toolUseId": tool_use["toolUseId"],
+                    }
+                }
+            )
+
+        return {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+            },
+            "stopReason": stop_reason,
+            "usage": usage
+            or {
+                "inputTokens": 150,
+                "outputTokens": 100,
+                "totalTokens": 250,
+            },
+        }
+
     # Test 1: Basic Text Generation
     @pytest.mark.asyncio
     async def test_basic_text_generation(self, mock_llm):
@@ -561,3 +599,213 @@ class TestBedrockAugmentedLLM:
             == "test_tool"
         )
         assert call_kwargs.payload["toolConfig"]["toolChoice"]["auto"] == {}
+
+    # Test: Generate with String Input
+    @pytest.mark.asyncio
+    async def test_generate_with_string_input(self, mock_llm):
+        """
+        Tests generate() method with string input.
+        """
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response("String input response")
+        )
+        responses = await mock_llm.generate("This is a simple string message")
+        assert len(responses) == 1
+        assert responses[0]["content"][0]["text"] == "String input response"
+        req = mock_llm.executor.execute.call_args[0][1]
+        assert req.payload["messages"][0]["role"] == "user"
+        assert (
+            req.payload["messages"][0]["content"][0]["text"]
+            == "This is a simple string message"
+        )
+
+    # Test: Generate with MessageParamT Input
+    @pytest.mark.asyncio
+    async def test_generate_with_message_param_input(self, mock_llm):
+        """
+        Tests generate() method with MessageParamT input (Bedrock message dict).
+        """
+        message_param = {
+            "role": "user",
+            "content": [{"text": "This is a MessageParamT message"}],
+        }
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response("MessageParamT input response")
+        )
+        responses = await mock_llm.generate(message_param)
+        assert len(responses) == 1
+        assert responses[0]["content"][0]["text"] == "MessageParamT input response"
+        req = mock_llm.executor.execute.call_args[0][1]
+        assert req.payload["messages"][0]["role"] == "user"
+        assert (
+            req.payload["messages"][0]["content"][0]["text"]
+            == "This is a MessageParamT message"
+        )
+
+    # Test: Generate with PromptMessage Input
+    @pytest.mark.asyncio
+    async def test_generate_with_prompt_message_input(self, mock_llm):
+        """
+        Tests generate() method with PromptMessage input (MCP PromptMessage).
+        """
+        from mcp.types import PromptMessage, TextContent
+
+        prompt_message = PromptMessage(
+            role="user",
+            content=TextContent(type="text", text="This is a PromptMessage"),
+        )
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response("PromptMessage input response")
+        )
+        responses = await mock_llm.generate(prompt_message)
+        assert len(responses) == 1
+        assert responses[0]["content"][0]["text"] == "PromptMessage input response"
+        req = mock_llm.executor.execute.call_args[0][1]
+        assert req.payload["messages"][0]["role"] == "user"
+        assert (
+            req.payload["messages"][0]["content"][0]["text"]
+            == "This is a PromptMessage"
+        )
+
+    # Test: Generate with Mixed Message Types List
+    @pytest.mark.asyncio
+    async def test_generate_with_mixed_message_types(self, mock_llm):
+        """
+        Tests generate() method with a list containing mixed message types.
+        """
+        from mcp.types import PromptMessage, TextContent
+
+        messages = [
+            "String message",
+            {"role": "user", "content": [{"text": "MessageParamT response"}]},
+            PromptMessage(
+                role="user",
+                content=TextContent(type="text", text="PromptMessage content"),
+            ),
+        ]
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response("Mixed message types response")
+        )
+        responses = await mock_llm.generate(messages)
+        assert len(responses) == 1
+        assert responses[0]["content"][0]["text"] == "Mixed message types response"
+
+    # Test: Generate String with Mixed Message Types List
+    @pytest.mark.asyncio
+    async def test_generate_str_with_mixed_message_types(self, mock_llm):
+        """
+        Tests generate_str() method with mixed message types.
+        """
+        from mcp.types import PromptMessage, TextContent
+
+        messages = [
+            "String message",
+            {"role": "user", "content": [{"text": "MessageParamT response"}]},
+            PromptMessage(
+                role="user",
+                content=TextContent(type="text", text="PromptMessage content"),
+            ),
+        ]
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response("Mixed types string response")
+        )
+        response_text = await mock_llm.generate_str(messages)
+        assert response_text == "Mixed types string response"
+
+    # Test: Generate Structured with Mixed Message Types
+    @pytest.mark.asyncio
+    async def test_generate_structured_with_mixed_message_types(self, mock_llm):
+        """
+        Tests generate_structured() method with mixed message types.
+        """
+        from pydantic import BaseModel
+        from mcp.types import PromptMessage, TextContent
+
+        class TestResponseModel(BaseModel):
+            name: str
+            value: int
+
+        messages = [
+            "String message",
+            {"role": "user", "content": [{"text": "MessageParamT response"}]},
+            PromptMessage(
+                role="user",
+                content=TextContent(type="text", text="PromptMessage content"),
+            ),
+        ]
+        mock_llm.executor.execute = AsyncMock(
+            return_value=self.create_text_response(
+                '{"name": "MixedTypes", "value": 123}'
+            )
+        )
+        # Patch generate_str to return the expected string
+        mock_llm.generate_str = AsyncMock(
+            return_value='{"name": "MixedTypes", "value": 123}'
+        )
+        # Patch executor.execute to return the expected model
+        mock_llm.executor.execute = AsyncMock(
+            return_value=TestResponseModel(name="MixedTypes", value=123)
+        )
+        result = await BedrockAugmentedLLM.generate_structured(
+            mock_llm, messages, TestResponseModel
+        )
+        assert isinstance(result, TestResponseModel)
+        assert result.name == "MixedTypes"
+        assert result.value == 123
+
+    # Test 16: Multiple Tool Usage
+    @pytest.mark.asyncio
+    async def test_multiple_tool_usage(self, mock_llm: BedrockAugmentedLLM):
+        """
+        Tests multiple tool uses in a single response.
+        Verifies that all tool results are combined into a single message.
+        """
+        # Setup mock executor to return multiple tool uses, then final response
+        mock_llm.executor.execute = AsyncMock(
+            side_effect=[
+                self.create_multiple_tool_use_response(
+                    tool_uses=[
+                        {"name": "test_tool", "input": {}, "toolUseId": "tool_1"},
+                        {"name": "test_tool", "input": {}, "toolUseId": "tool_2"},
+                    ],
+                    text_prefix="Processing with multiple tools",
+                ),
+                self.create_text_response("Final response after both tools"),
+            ]
+        )
+
+        # Mock tool calls
+        mock_llm.call_tool = AsyncMock(
+            side_effect=[
+                MagicMock(
+                    content=[TextContent(type="text", text="Tool 1 result")],
+                    isError=False,
+                ),
+                MagicMock(
+                    content=[TextContent(type="text", text="Tool 2 result")],
+                    isError=False,
+                ),
+            ]
+        )
+
+        # Call LLM
+        responses = await mock_llm.generate("Test multiple tools")
+
+        # Assertions
+        assert len(responses) == 3
+
+        # First response: assistant with 2 tool uses
+        assert responses[0]["role"] == "assistant"
+        assert len(responses[0]["content"]) == 3  # text + 2 tool uses
+
+        # Second response: single user message with both tool results
+        assert responses[1]["role"] == "user"
+        assert len(responses[1]["content"]) == 2  # 2 tool results combined
+        assert responses[1]["content"][0]["toolResult"]["toolUseId"] == "tool_1"
+        assert responses[1]["content"][1]["toolResult"]["toolUseId"] == "tool_2"
+
+        # Third response: final assistant message
+        assert responses[2]["content"][0]["text"] == "Final response after both tools"
+
+        # Verify both tools were called
+        assert mock_llm.call_tool.call_count == 2

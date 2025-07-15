@@ -233,7 +233,7 @@ class Orchestrator(AugmentedLLM[MessageParamT, MessageT]):
 
             result_str = await self.generate_str(message=message, request_params=params)
 
-            llm = self.llm_factory(
+            llm: AugmentedLLM = self.llm_factory(
                 agent=Agent(
                     name="Structured Output",
                     instruction="Produce a structured output given a message",

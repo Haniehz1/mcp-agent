@@ -2,7 +2,7 @@ from typing import Any, Iterable, List, Type, Union, cast
 
 from pydantic import BaseModel
 
-from anthropic import Anthropic
+from anthropic import Anthropic, AnthropicBedrock, AnthropicVertex
 from anthropic.types import (
     ContentBlock,
     DocumentBlockParam,
@@ -56,6 +56,7 @@ from mcp_agent.workflows.llm.augmented_llm import (
     CallToolResult,
 )
 from mcp_agent.logging.logger import get_logger
+from mcp_agent.workflows.llm.multipart_converter_anthropic import AnthropicConverter
 
 MessageParamContent = Union[
     str,
@@ -88,6 +89,25 @@ class RequestStructuredCompletionRequest(BaseModel):
     model: str
 
 
+def create_anthropic_instance(settings: AnthropicSettings):
+    """Select and initialise the appropriate anthropic client instance based on settings"""
+    if settings.provider == "bedrock":
+        anthropic = AnthropicBedrock(
+            aws_access_key=settings.aws_access_key_id,
+            aws_secret_key=settings.aws_secret_access_key,
+            aws_session_token=settings.aws_session_token,
+            aws_region=settings.aws_region,
+        )
+    elif settings.provider == "vertexai":
+        anthropic = AnthropicVertex(
+            region=settings.location,
+            project_id=settings.project,
+        )
+    else:
+        anthropic = Anthropic(api_key=settings.api_key)
+    return anthropic
+
+
 class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
     """
     The basic building block of agentic systems is an LLM enhanced with augmentations
@@ -113,11 +133,17 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
             intelligencePriority=0.3,
         )
 
-        default_model = "claude-3-7-sonnet-latest"  # Fallback default
+        default_model = "claude-sonnet-4-20250514"
 
         if self.context.config.anthropic:
+            if self.context.config.anthropic.provider == "bedrock":
+                default_model = "anthropic.claude-sonnet-4-20250514-v1:0"
+            elif self.context.config.anthropic.provider == "vertexai":
+                default_model = "claude-sonnet-4@20250514"
+
             if hasattr(self.context.config.anthropic, "default_model"):
                 default_model = self.context.config.anthropic.default_model
+
         self.default_request_params = self.default_request_params or RequestParams(
             model=default_model,
             modelPreferences=self.model_preferences,
@@ -154,22 +180,18 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
 
             if params.use_history:
                 messages.extend(self.history.get())
+            messages.extend(
+                AnthropicConverter.convert_mixed_messages_to_anthropic(message)
+            )
 
-            if isinstance(message, str):
-                messages.append({"role": "user", "content": message})
-            elif isinstance(message, list):
-                messages.extend(message)
-            else:
-                messages.append(message)
-
-            response = await self.agent.list_tools()
+            list_tools_result = await self.agent.list_tools()
             available_tools: List[ToolParam] = [
                 {
                     "name": tool.name,
                     "description": tool.description,
                     "input_schema": tool.inputSchema,
                 }
-                for tool in response.tools
+                for tool in list_tools_result.tools
             ]
 
             responses: List[Message] = []
@@ -185,7 +207,8 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
             for i in range(params.max_iterations):
                 if (
                     i == params.max_iterations - 1
-                    and response.stop_reason == "tool_use"
+                    and responses
+                    and responses[-1].stop_reason == "tool_use"
                 ):
                     final_prompt_message = MessageParam(
                         role="user",
@@ -201,7 +224,7 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
                     "max_tokens": params.maxTokens,
                     "messages": messages,
                     "system": self.instruction or params.systemPrompt,
-                    "stop_sequences": params.stopSequences,
+                    "stop_sequences": params.stopSequences or [],
                     "tools": available_tools,
                 }
 
@@ -480,7 +503,7 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
 
         return str(message)
 
-    def message_str(self, message: Message) -> str:
+    def message_str(self, message: Message, content_only: bool = False) -> str:
         """Convert an output message to a string representation."""
         content = message.content
 
@@ -496,6 +519,9 @@ class AnthropicAugmentedLLM(AugmentedLLM[MessageParam, Message]):
                 return "\n".join(final_text)
             else:
                 return str(content)
+        elif content_only:
+            # If content_only is True, we return an empty string if there's no content
+            return ""
 
         return str(message)
 
@@ -708,7 +734,7 @@ class AnthropicCompletionTasks:
         Request a completion from Anthropic's API.
         """
 
-        anthropic = Anthropic(api_key=request.config.api_key)
+        anthropic = create_anthropic_instance(request.config)
 
         payload = request.payload
         response = anthropic.messages.create(**payload)
@@ -736,9 +762,7 @@ class AnthropicCompletionTasks:
             )
 
         # We pass the text through instructor to extract structured data
-        client = instructor.from_anthropic(
-            Anthropic(api_key=request.config.api_key),
-        )
+        client = instructor.from_anthropic(create_anthropic_instance(request.config))
 
         # Extract structured data from natural language
         structured_response = client.chat.completions.create(

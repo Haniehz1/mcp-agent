@@ -59,6 +59,16 @@ class WorkflowResult(BaseModel, Generic[T]):
     end_time: float | None = None
 
 
+class WorkflowExecution(BaseModel):
+    """
+    Represents a workflow execution with its run ID and workflow ID.
+    This is used to track the execution of workflows.
+    """
+
+    workflow_id: str
+    run_id: str | None = None
+
+
 class Workflow(ABC, Generic[T], ContextDependent):
     """
     Base class for user-defined workflows.
@@ -86,7 +96,8 @@ class Workflow(ABC, Generic[T], ContextDependent):
         self.name = name or self.__class__.__name__
         self._logger = get_logger(f"workflow.{self.name}")
         self._initialized = False
-        self._run_id = None
+        self._workflow_id = None  # Will be set during run_async
+        self._run_id = None  # Will be set during run_async
         self._run_task = None
 
         # A simple workflow state object
@@ -112,7 +123,7 @@ class Workflow(ABC, Generic[T], ContextDependent):
         """
         Get the workflow ID for this workflow.
         """
-        return self.name
+        return self._workflow_id
 
     @property
     def run_id(self) -> str | None:
@@ -175,20 +186,23 @@ class Workflow(ABC, Generic[T], ContextDependent):
         # The run task will be cancelled in the run_async method
         return signal
 
-    async def run_async(self, *args, **kwargs) -> str:
+    async def run_async(self, *args, **kwargs) -> "WorkflowExecution":
         """
-        Run the workflow asynchronously and return a workflow ID.
+        Run the workflow asynchronously and return the WorkflowExecution.
 
         This creates an async task that will be executed through the executor
-        and returns immediately with a workflow run ID that can be used to
-        check status, resume, or cancel.
+        and returns immediately with a WorkflowExecution with run ID that can
+        be used to check status, resume, or cancel.
 
         Args:
             *args: Positional arguments to pass to the run method
             **kwargs: Keyword arguments to pass to the run method
+                Special kwargs that are extracted and not passed to run():
+                - __mcp_agent_workflow_id: Optional workflow ID to use (instead of auto-generating)
+                - __mcp_agent_task_queue: Optional task queue to use (instead of default from config)
 
         Returns:
-            str: A unique workflow ID that can be used to reference this workflow instance
+            WorkflowExecution: The execution details including run ID and workflow ID
         """
 
         import asyncio
@@ -196,18 +210,39 @@ class Workflow(ABC, Generic[T], ContextDependent):
 
         handle: "WorkflowHandle" | None = None
 
+        # Extract special kwargs that shouldn't be passed to the run method
+        # Using __mcp_agent_ prefix to avoid conflicts with user parameters
+        provided_workflow_id = kwargs.pop("__mcp_agent_workflow_id", None)
+        provided_task_queue = kwargs.pop("__mcp_agent_task_queue", None)
+
         self.update_status("scheduled")
 
         if self.context.config.execution_engine == "asyncio":
             # Generate a unique ID for this workflow instance
+            if not self._workflow_id:
+                self._workflow_id = provided_workflow_id or self.name
             if not self._run_id:
                 self._run_id = str(self.executor.uuid())
         elif self.context.config.execution_engine == "temporal":
             # For Temporal workflows, we'll start the workflow immediately
             executor: TemporalExecutor = self.executor
-            handle = await executor.start_workflow(self.name, *args, **kwargs)
+            handle = await executor.start_workflow(
+                self.name,
+                *args,
+                workflow_id=provided_workflow_id,
+                task_queue=provided_task_queue,
+                **kwargs,
+            )
+            self._workflow_id = handle.id
             self._run_id = handle.result_run_id or handle.run_id
-            self._logger.debug(f"Workflow started with run ID: {self._run_id}")
+        else:
+            raise ValueError(
+                f"Unsupported execution engine: {self.context.config.execution_engine}"
+            )
+
+        self._logger.debug(
+            f"Workflow started with workflow ID: {self._workflow_id}, run ID: {self._run_id}"
+        )
 
         # Define the workflow execution function
         async def _execute_workflow():
@@ -285,11 +320,14 @@ class Workflow(ABC, Generic[T], ContextDependent):
             await self.context.workflow_registry.register(
                 workflow=self,
                 run_id=self._run_id,
-                workflow_id=self.name,
+                workflow_id=self.id,
                 task=self._run_task,
             )
 
-        return self._run_id
+        return WorkflowExecution(
+            run_id=self._run_id,
+            workflow_id=self._workflow_id,
+        )
 
     async def resume(
         self, signal_name: str | None = "resume", payload: str | None = None
@@ -314,7 +352,7 @@ class Workflow(ABC, Generic[T], ContextDependent):
             )
             signal = Signal(
                 name=signal_name,
-                workflow_id=self.name,
+                workflow_id=self.id,
                 run_id=self._run_id,
                 payload=payload,
             )
@@ -344,7 +382,7 @@ class Workflow(ABC, Generic[T], ContextDependent):
             # when the workflow checks for cancellation
             self._logger.info(f"Sending cancel signal to workflow {self._run_id}")
             await self.executor.signal(
-                "cancel", workflow_id=self.name, run_id=self._run_id
+                "cancel", workflow_id=self.id, run_id=self._run_id
             )
             return True
         except Exception as e:

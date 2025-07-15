@@ -273,7 +273,6 @@ class AsyncEventBus:
         self.listeners: Dict[str, EventListener] = {}
         self._task: asyncio.Task | None = None
         self._running = False
-        self.init_queue()
 
     def init_queue(self):
         if self._running:

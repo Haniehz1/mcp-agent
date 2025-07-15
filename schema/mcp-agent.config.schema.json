@@ -15,6 +15,112 @@
           ],
           "default": null,
           "title": "Api Key"
+        },
+        "default_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Model"
+        },
+        "provider": {
+          "default": "anthropic",
+          "title": "Bedrock",
+          "type": "string",
+          "enum": [
+            "anthropic",
+            "bedrock",
+            "vertexai"
+          ]
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        },
+        "aws_access_key_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Access Key Id"
+        },
+        "aws_secret_access_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Secret Access Key"
+        },
+        "aws_session_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Session Token"
+        },
+        "aws_region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aws Region"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
         }
       },
       "title": "AnthropicSettings",
@@ -130,6 +236,38 @@
         }
       },
       "title": "BedrockSettings",
+      "type": "object"
+    },
+    "VertexAISettings": {
+      "additionalProperties": true,
+      "description": "Settings for using VertexAI models in the MCP Agent application",
+      "properties": {
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        }
+      },
+      "title": "VertexAISettings",
       "type": "object"
     },
     "CohereSettings": {
@@ -659,6 +797,18 @@
           ],
           "default": null,
           "title": "Default Headers"
+        },
+        "default_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Model"
         }
       },
       "title": "OpenAISettings",
@@ -760,6 +910,23 @@
           "title": "Namespace",
           "type": "string"
         },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Api Key"
+        },
+        "tls": {
+          "default": false,
+          "title": "Tls",
+          "type": "boolean"
+        },
         "task_queue": {
           "title": "Task Queue",
           "type": "string"
@@ -775,18 +942,6 @@
           ],
           "default": null,
           "title": "Max Concurrent Activities"
-        },
-        "api_key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Api Key"
         },
         "timeout_seconds": {
           "anyOf": [

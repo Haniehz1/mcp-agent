@@ -34,12 +34,14 @@ from mcp_agent.logging.logger import get_logger
 
 if TYPE_CHECKING:
     from mcp_agent.human_input.types import HumanInputCallback
+    from mcp_agent.elicitation.types import ElicitationCallback
     from mcp_agent.executor.workflow_signal import SignalWaitCallback
     from mcp_agent.executor.workflow_registry import WorkflowRegistry
     from mcp_agent.app import MCPApp
 else:
     # Runtime placeholders for the types
     HumanInputCallback = Any
+    ElicitationCallback = Any
     SignalWaitCallback = Any
     WorkflowRegistry = Any
     MCPApp = Any
@@ -56,6 +58,7 @@ class Context(BaseModel):
     config: Optional[Settings] = None
     executor: Optional[Executor] = None
     human_input_handler: Optional[HumanInputCallback] = None
+    elicitation_handler: Optional[ElicitationCallback] = None
     signal_notification: Optional[SignalWaitCallback] = None
     upstream_session: Optional[ServerSession] = None  # TODO: saqadri - figure this out
     model_selector: Optional[ModelSelector] = None
@@ -72,6 +75,8 @@ class Context(BaseModel):
     tracer: Optional[trace.Tracer] = None
     # Use this flag to conditionally serialize expensive data for tracing
     tracing_enabled: bool = False
+    # Store the TracingConfig instance for this context
+    tracing_config: Optional[TracingConfig] = None
 
     model_config = ConfigDict(
         extra="allow",
@@ -79,14 +84,21 @@ class Context(BaseModel):
     )
 
 
-async def configure_otel(config: "Settings", session_id: str | None = None):
+async def configure_otel(
+    config: "Settings", session_id: str | None = None
+) -> Optional[TracingConfig]:
     """
     Configure OpenTelemetry based on the application config.
+
+    Returns:
+        TracingConfig instance if OTEL is enabled, None otherwise
     """
     if not config.otel.enabled:
-        return
+        return None
 
-    await TracingConfig.configure(settings=config.otel, session_id=session_id)
+    tracing_config = TracingConfig()
+    await tracing_config.configure(settings=config.otel, session_id=session_id)
+    return tracing_config
 
 
 async def configure_logger(config: "Settings", session_id: str | None = None):
@@ -176,7 +188,7 @@ async def initialize_context(
     context.session_id = str(context.executor.uuid())
 
     # Configure logging and telemetry
-    await configure_otel(config, context.session_id)
+    context.tracing_config = await configure_otel(config, context.session_id)
     await configure_logger(config, context.session_id)
     await configure_usage_telemetry(config)
 
@@ -194,7 +206,13 @@ async def initialize_context(
     # Store the tracer in context if needed
     if config.otel.enabled:
         context.tracing_enabled = True
-        context.tracer = trace.get_tracer(config.otel.service_name)
+
+        if context.tracing_config is not None:
+            # Use the app-specific tracer from the TracingConfig
+            context.tracer = context.tracing_config.get_tracer(config.otel.service_name)
+        else:
+            # Use the global tracer if TracingConfig is not set
+            context.tracer = trace.get_tracer(config.otel.service_name)
 
     if store_globally:
         global _global_context
@@ -203,13 +221,20 @@ async def initialize_context(
     return context
 
 
-async def cleanup_context():
+async def cleanup_context(shutdown_logger: bool = False):
     """
     Cleanup the global application context.
-    """
 
-    # Shutdown logging and telemetry
-    await LoggingConfig.shutdown()
+    Args:
+        shutdown_logger: If True, completely shutdown OTEL infrastructure.
+                      If False, just cleanup app-specific resources.
+    """
+    if shutdown_logger:
+        # Shutdown logging and telemetry completely
+        await LoggingConfig.shutdown()
+    else:
+        # Just cleanup app-specific resources
+        pass
 
 
 _global_context: Context | None = None

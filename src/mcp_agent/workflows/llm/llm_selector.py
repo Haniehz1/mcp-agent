@@ -88,6 +88,9 @@ class ModelInfo(BaseModel):
     name: str
     description: str | None = None
     provider: str
+    context_window: int | None = None
+    tool_calling: bool | None = None
+    structured_outputs: bool | None = None
     metrics: ModelMetrics
 
 
@@ -129,10 +132,30 @@ class ModelSelector(ContextDependent):
         self.models_by_provider = self._models_by_provider(self.models)
 
     def select_best_model(
-        self, model_preferences: ModelPreferences, provider: str | None = None
+        self,
+        model_preferences: ModelPreferences,
+        provider: str | None = None,
+        min_tokens: int | None = None,
+        max_tokens: int | None = None,
+        tool_calling: bool | None = None,
+        structured_outputs: bool | None = None,
     ) -> ModelInfo:
         """
         Select the best model from a given list of models based on the given model preferences.
+
+        Args:
+            model_preferences: MCP ModelPreferences with cost, speed, and intelligence priorities
+            provider: Optional provider to filter models by
+            min_tokens: Minimum context window size (in tokens) required
+            max_tokens: Maximum context window size (in tokens) allowed
+            tool_calling: If True, only include models with tool calling support; if None, no filter
+            structured_outputs: If True, only include models with structured outputs support; if None, no filter
+
+        Returns:
+            ModelInfo: The best model based on the preferences and filters
+
+        Raises:
+            ValueError: If no models match the specified criteria
         """
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
@@ -141,6 +164,16 @@ class ModelSelector(ContextDependent):
             if self.context.tracing_enabled and self.benchmark_weights:
                 for k, v in self.benchmark_weights.items():
                     span.set_attribute(f"benchmark_weights.{k}", v)
+
+            # Set tracing attributes for new parameters
+            if min_tokens is not None:
+                span.set_attribute("min_tokens", min_tokens)
+            if max_tokens is not None:
+                span.set_attribute("max_tokens", max_tokens)
+            if tool_calling is not None:
+                span.set_attribute("tool_calling", tool_calling)
+            if structured_outputs is not None:
+                span.set_attribute("structured_outputs", structured_outputs)
 
             models: List[ModelInfo] = []
             if provider:
@@ -170,6 +203,41 @@ class ModelSelector(ContextDependent):
                 if not candidate_models:
                     # If no hints match, we'll use all models and let the benchmark weights decide
                     candidate_models = models
+
+            # Filter by context window, tool calling, and structured outputs
+            filtered_models = []
+            for model in candidate_models:
+                # Check context window constraints
+                if min_tokens is not None and model.context_window is not None:
+                    if model.context_window < min_tokens:
+                        continue
+                if max_tokens is not None and model.context_window is not None:
+                    if model.context_window > max_tokens:
+                        continue
+
+                # Check tool calling requirement
+                if tool_calling is not None and model.tool_calling is not None:
+                    if tool_calling and not model.tool_calling:
+                        continue
+
+                # Check structured outputs requirement
+                if (
+                    structured_outputs is not None
+                    and model.structured_outputs is not None
+                ):
+                    if structured_outputs and not model.structured_outputs:
+                        continue
+
+                filtered_models.append(model)
+
+            candidate_models = filtered_models
+
+            if not candidate_models:
+                raise ValueError(
+                    f"No models match the specified criteria. "
+                    f"min_tokens={min_tokens}, max_tokens={max_tokens}, "
+                    f"tool_calling={tool_calling}, structured_outputs={structured_outputs}"
+                )
 
             scores = []
 

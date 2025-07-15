@@ -4,7 +4,7 @@ import uuid
 from typing import Callable, Dict, List, Optional, TypeVar, TYPE_CHECKING, Any
 
 from opentelemetry import trace
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, PrivateAttr
 
 from mcp.server.fastmcp.tools import Tool as FastTool
 from mcp.types import (
@@ -15,13 +15,26 @@ from mcp.types import (
     ServerCapabilities,
     TextContent,
     Tool,
+    ListResourcesResult,
+    ReadResourceResult,
+    PromptMessage,
+    EmbeddedResource,
 )
 
 from mcp_agent.core.context import Context
 from mcp_agent.tracing.semconv import GEN_AI_AGENT_NAME, GEN_AI_TOOL_NAME
-from mcp_agent.tracing.telemetry import get_tracer, record_attributes
+from mcp_agent.tracing.telemetry import (
+    annotate_span_for_call_tool_result,
+    get_tracer,
+    record_attributes,
+)
 from mcp_agent.mcp.mcp_agent_client_session import MCPAgentClientSession
-from mcp_agent.mcp.mcp_aggregator import MCPAggregator, NamespacedPrompt, NamespacedTool
+from mcp_agent.mcp.mcp_aggregator import (
+    MCPAggregator,
+    NamespacedPrompt,
+    NamespacedTool,
+    NamespacedResource,
+)
 from mcp_agent.human_input.types import (
     HumanInputRequest,
     HumanInputResponse,
@@ -120,30 +133,25 @@ class Agent(BaseModel):
         default_factory=dict
     )
 
+    # Maps namespaced_resource_name -> namespaced resource info
+    _namespaced_resource_map: Dict[str, NamespacedResource] = PrivateAttr(
+        default_factory=dict
+    )
+    # Cache for resource objects, maps server_name -> list of resource objects
+    _server_to_resource_map: Dict[str, List[NamespacedResource]] = PrivateAttr(
+        default_factory=dict
+    )
+
     _agent_tasks: "AgentTasks" = PrivateAttr(default=None)
     _init_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     # endregion
 
     def model_post_init(self, __context) -> None:
-        if self.context is None:
-            # Fall back to global context if available
-            from mcp_agent.core.context import get_current_context
-
-            self.context = get_current_context()
-
         # Map function names to tools
         self._function_tool_map = {
             (tool := FastTool.from_function(fn)).name: tool for fn in self.functions
         }
-
-        # Default human_input_callback from context, if absent
-        if self.human_input_callback is None:
-            ctx_handler = getattr(self.context, "human_input_handler", None)
-            if ctx_handler is not None:
-                self.human_input_callback = ctx_handler
-
-        self._agent_tasks = AgentTasks(self.context)
 
     async def attach_llm(
         self, llm_factory: Callable[..., LLM] | None = None, llm: LLM | None = None
@@ -167,6 +175,9 @@ class Agent(BaseModel):
         ) as span:
             if llm:
                 self.llm = llm
+                llm.agent = self
+                if not llm.instruction:
+                    llm.instruction = self.instruction
             elif llm_factory:
                 self.llm = llm_factory(agent=self)
             else:
@@ -182,6 +193,16 @@ class Agent(BaseModel):
 
     async def initialize(self, force: bool = False):
         """Initialize the agent."""
+
+        if self.initialized and not force:
+            return
+
+        if self.context is None:
+            # Fall back to global context if available
+            from mcp_agent.core.context import get_current_context
+
+            self.context = get_current_context()
+
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
             f"{self.__class__.__name__}.{self.name}.initialize"
@@ -192,11 +213,16 @@ class Agent(BaseModel):
             span.set_attribute("force", force)
 
             async with self._init_lock:
-                if self.initialized and not force:
-                    return
-
                 span.add_event("initialize_start")
                 logger.debug(f"Initializing agent {self.name}...")
+
+                if self._agent_tasks is None:
+                    self._agent_tasks = AgentTasks(self.context)
+
+                if self.human_input_callback is None:
+                    ctx_handler = getattr(self.context, "human_input_handler", None)
+                    if ctx_handler is not None:
+                        self.human_input_callback = ctx_handler
 
                 executor = self.context.executor
 
@@ -229,6 +255,12 @@ class Agent(BaseModel):
                 self._server_to_prompt_map.clear()
                 self._server_to_prompt_map.update(result.server_to_prompt_map)
 
+                self._namespaced_resource_map.clear()
+                self._namespaced_resource_map.update(result.namespaced_resource_map)
+
+                self._server_to_resource_map.clear()
+                self._server_to_resource_map.update(result.server_to_resource_map)
+
                 self.initialized = result.initialized
                 span.add_event("initialize_complete")
                 logger.debug(f"Agent {self.name} initialized.")
@@ -239,6 +271,10 @@ class Agent(BaseModel):
         NOTE: This method is called automatically when the agent is used as an async context manager.
         """
         logger.debug(f"Shutting down agent {self.name}...")
+
+        if not self.initialized:
+            logger.debug(f"Agent {self.name} is not initialized, skipping shutdown.")
+            return
 
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
@@ -283,15 +319,15 @@ class Agent(BaseModel):
         """
         Get the capabilities of a specific server.
         """
+        if not self.initialized:
+            await self.initialize()
+
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
             f"{self.__class__.__name__}.{self.name}.get_capabilities"
         ) as span:
             span.set_attribute(GEN_AI_AGENT_NAME, self.name)
             span.set_attribute("initialized", self.initialized)
-
-            if not self.initialized:
-                await self.initialize()
 
             executor = self.context.executor
             result: Dict[str, ServerCapabilities] = await executor.execute(
@@ -337,6 +373,8 @@ class Agent(BaseModel):
         """
         Get the session data of a specific server.
         """
+        if not self.initialized:
+            await self.initialize()
 
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
@@ -344,9 +382,6 @@ class Agent(BaseModel):
         ) as span:
             span.set_attribute(GEN_AI_AGENT_NAME, self.name)
             span.set_attribute("initialized", self.initialized)
-
-            if not self.initialized:
-                await self.initialize()
 
             executor = self.context.executor
             result: GetServerSessionResponse = await executor.execute(
@@ -357,6 +392,9 @@ class Agent(BaseModel):
             return result
 
     async def list_tools(self, server_name: str | None = None) -> ListToolsResult:
+        if not self.initialized:
+            await self.initialize()
+
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
             f"{self.__class__.__name__}.{self.name}.list_tools"
@@ -366,9 +404,6 @@ class Agent(BaseModel):
             span.set_attribute(
                 "human_input_callback", self.human_input_callback is not None
             )
-
-            if not self.initialized:
-                await self.initialize()
 
             if server_name:
                 span.set_attribute("server_name", server_name)
@@ -441,13 +476,7 @@ class Agent(BaseModel):
                 Tool(
                     name=HUMAN_INPUT_TOOL_NAME,
                     description=human_input_tool.description,
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "request": HumanInputRequest.model_json_schema()
-                        },
-                        "required": ["request"],
-                    },
+                    inputSchema=human_input_tool.parameters,
                 )
             )
 
@@ -455,7 +484,155 @@ class Agent(BaseModel):
 
             return result
 
+    async def list_resources(
+        self, server_name: str | None = None
+    ) -> ListResourcesResult:
+        """
+        List resources available to the agent from MCP servers.
+        """
+        if not self.initialized:
+            await self.initialize()
+
+        tracer = get_tracer(self.context)
+        with tracer.start_as_current_span(
+            f"{self.__class__.__name__}.{self.name}.list_resources"
+        ) as span:
+            span.set_attribute(GEN_AI_AGENT_NAME, self.name)
+            span.set_attribute("initialized", self.initialized)
+            if server_name:
+                span.set_attribute("server_name", server_name)
+
+            executor = self.context.executor
+            result: ListResourcesResult = await executor.execute(
+                self._agent_tasks.list_resources_task,
+                ListResourcesRequest(agent_name=self.name, server_name=server_name),
+            )
+            return result
+
+    async def read_resource(self, uri: str, server_name: str | None = None):
+        """
+        Read a resource from an MCP server.
+        """
+        if not self.initialized:
+            await self.initialize()
+
+        tracer = get_tracer(self.context)
+        with tracer.start_as_current_span(
+            f"{self.__class__.__name__}.{self.name}.read_resource"
+        ) as span:
+            span.set_attribute(GEN_AI_AGENT_NAME, self.name)
+            span.set_attribute("initialized", self.initialized)
+            span.set_attribute("uri", uri)
+            if server_name:
+                span.set_attribute("server_name", server_name)
+
+            executor = self.context.executor
+            result: ReadResourceResult = await executor.execute(
+                self._agent_tasks.read_resource_task,
+                ReadResourceRequest(
+                    agent_name=self.name, uri=uri, server_name=server_name
+                ),
+            )
+            return result
+
+    async def create_prompt(
+        self,
+        *,
+        prompt_name: str | None = None,
+        arguments: dict[str, str] | None = None,
+        resource_uris: list[str | AnyUrl] | str | AnyUrl | None = None,
+        server_names: list[str] | None = None,
+    ) -> list[PromptMessage]:
+        """
+        Create prompt messages from a prompt name and/or resource URIs.
+
+        Args:
+            prompt_name: Name of the prompt to retrieve
+            arguments: Arguments for the prompt (only used with prompt_name)
+            resource_uris: URI(s) of the resource(s) to retrieve. Can be a single URI or list of URIs.
+            server_names: List of server names to search across. If None, searches across all servers the agent have access to.
+
+        Returns:
+            List of PromptMessage objects. If both prompt_name and resource_uris are provided,
+            the results are combined with prompt messages first, then resource messages.
+
+        Raises:
+            ValueError: If neither prompt_name nor resource_uris are provided
+        """
+        if prompt_name is None and resource_uris is None:
+            raise ValueError(
+                "Must specify at least one of prompt_name or resource_uris"
+            )
+
+        messages = []
+
+        # Use provided server_names or default to all servers
+        target_servers = server_names or self.server_names
+
+        # Get prompt messages if prompt_name is provided
+        if prompt_name is not None:
+            # Try to find the prompt across the specified servers
+            prompt_found = False
+            for server in target_servers:
+                try:
+                    result = await self.get_prompt(
+                        prompt_name, arguments, server_name=server
+                    )
+                    if not getattr(result, "isError", False):
+                        messages.extend(result.messages)
+                        prompt_found = True
+                        break
+                except Exception:
+                    # Continue to next server if this one fails
+                    continue
+
+            if not prompt_found:
+                raise ValueError(
+                    f"Prompt '{prompt_name}' not found in any of the specified servers: {target_servers}"
+                )
+
+        # Get resource messages if resource_uris is provided
+        if resource_uris is not None:
+            # Normalize to list
+            if isinstance(resource_uris, (str, AnyUrl)):
+                uris_list = [resource_uris]
+            else:
+                uris_list = resource_uris
+
+            # Process each URI - try to find it across the specified servers
+            for uri in uris_list:
+                resource_found = False
+                for server in target_servers:
+                    try:
+                        resource_result = await self.read_resource(str(uri), server)
+                        resource_messages = [
+                            PromptMessage(
+                                role="user",
+                                content=EmbeddedResource(
+                                    type="resource", resource=content
+                                ),
+                            )
+                            for content in resource_result.contents
+                        ]
+                        messages.extend(resource_messages)
+                        resource_found = True
+                        break
+                    except Exception:
+                        # Continue to next server if this one fails
+                        continue
+
+                if not resource_found:
+                    raise ValueError(
+                        f"Resource '{uri}' not found in any of the specified servers: {target_servers}"
+                    )
+
+        return messages
+
     async def list_prompts(self, server_name: str | None = None) -> ListPromptsResult:
+        # Check if the agent is initialized
+        if not self.initialized:
+            await self.initialize()
+
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
             f"{self.__class__.__name__}.{self.name}.list_prompts"
@@ -465,10 +642,6 @@ class Agent(BaseModel):
 
             if server_name:
                 span.set_attribute("server_name", server_name)
-
-            # Check if the agent is initialized
-            if not self.initialized:
-                await self.initialize()
 
             executor = self.context.executor
             result: ListPromptsResult = await executor.execute(
@@ -500,8 +673,14 @@ class Agent(BaseModel):
             return result
 
     async def get_prompt(
-        self, name: str, arguments: dict[str, str] | None = None
+        self,
+        name: str,
+        arguments: dict[str, str] | None = None,
+        server_name: str | None = None,
     ) -> GetPromptResult:
+        if not self.initialized:
+            await self.initialize()
+
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
             f"{self.__class__.__name__}.{self.name}.get_prompt"
@@ -512,13 +691,15 @@ class Agent(BaseModel):
                 span.set_attribute("initialized", self.initialized)
                 record_attributes(span, arguments, "arguments")
 
-            if not self.initialized:
-                await self.initialize()
-
             executor = self.context.executor
             result: GetPromptResult = await executor.execute(
                 self._agent_tasks.get_prompt_task,
-                GetPromptRequest(agent_name=self.name, name=name, arguments=arguments),
+                GetPromptRequest(
+                    agent_name=self.name,
+                    server_name=server_name,
+                    name=name,
+                    arguments=arguments,
+                ),
             )
 
             if getattr(result, "isError", False):
@@ -606,12 +787,19 @@ class Agent(BaseModel):
                                 "metadata": json.dumps(user_input.metadata or {}),
                             },
                         )
+
                     await self.context.executor.signal(
-                        signal_name=request_id, payload=user_input
+                        signal_name=request_id,
+                        payload=user_input,
+                        workflow_id=request.workflow_id,
+                        run_id=request.run_id,
                     )
                 except Exception as e:
                     await self.context.executor.signal(
-                        request_id, payload=f"Error getting human input: {str(e)}"
+                        request_id,
+                        payload=f"Error getting human input: {str(e)}",
+                        workflow_id=request.workflow_id,
+                        run_id=request.run_id,
                     )
 
             asyncio.create_task(call_callback_and_signal())
@@ -648,6 +836,8 @@ class Agent(BaseModel):
         self, name: str, arguments: dict | None = None, server_name: str | None = None
     ) -> CallToolResult:
         # Call the tool on the server
+        if not self.initialized:
+            await self.initialize()
 
         tracer = get_tracer(self.context)
         with tracer.start_as_current_span(
@@ -664,28 +854,10 @@ class Agent(BaseModel):
                 if arguments is not None:
                     record_attributes(span, arguments, "arguments")
 
-            if not self.initialized:
-                await self.initialize()
-
             def _annotate_span_for_result(result: CallToolResult):
                 if not self.context.tracing_enabled:
                     return
-                span.set_attribute("result.isError", result.isError)
-                if result.isError:
-                    span.set_status(trace.Status(trace.StatusCode.ERROR))
-                    error_message = (
-                        result.content[0].text
-                        if len(result.content) > 0 and result.content[0].type == "text"
-                        else "Error calling tool"
-                    )
-                    span.record_exception(Exception(error_message))
-                else:
-                    for idx, content in enumerate(result.content):
-                        span.set_attribute(f"result.content.{idx}.type", content.type)
-                        if content.type == "text":
-                            span.set_attribute(
-                                f"result.content.{idx}.text", result.content[idx].text
-                            )
+                annotate_span_for_call_tool_result(span, result)
 
             if name == HUMAN_INPUT_TOOL_NAME:
                 # Call the human input tool
@@ -720,7 +892,9 @@ class Agent(BaseModel):
     ) -> CallToolResult:
         # Handle human input request
         try:
-            request = HumanInputRequest(**arguments["request"])
+            request = self.context.executor.create_human_input_request(
+                arguments["request"]
+            )
             result: HumanInputResponse = await self.request_human_input(request=request)
             return CallToolResult(
                 content=[
@@ -773,6 +947,11 @@ class InitAggregatorResponse(BaseModel):
 
     namespaced_prompt_map: Dict[str, NamespacedPrompt] = Field(default_factory=dict)
     server_to_prompt_map: Dict[str, List[NamespacedPrompt]] = Field(
+        default_factory=dict
+    )
+
+    namespaced_resource_map: Dict[str, NamespacedResource] = Field(default_factory=dict)
+    server_to_resource_map: Dict[str, List[NamespacedResource]] = Field(
         default_factory=dict
     )
 
@@ -837,6 +1016,25 @@ class GetServerSessionRequest(BaseModel):
     server_name: str
 
 
+class ListResourcesRequest(BaseModel):
+    """
+    Request to list resources for an agent.
+    """
+
+    agent_name: str
+    server_name: Optional[str] = None
+
+
+class ReadResourceRequest(BaseModel):
+    """
+    Request to read a resource for an agent.
+    """
+
+    agent_name: str
+    uri: str
+    server_name: Optional[str] = None
+
+
 class GetServerSessionResponse(BaseModel):
     """
     Response to the get server session request.
@@ -899,6 +1097,8 @@ class AgentTasks:
             server_to_tool_map=aggregator._server_to_tool_map,
             namespaced_prompt_map=aggregator._namespaced_prompt_map,
             server_to_prompt_map=aggregator._server_to_prompt_map,
+            namespaced_resource_map=aggregator._namespaced_resource_map,
+            server_to_resource_map=aggregator._server_to_resource_map,
         )
 
     async def shutdown_aggregator_task(self, agent_name: str) -> bool:
@@ -1048,3 +1248,30 @@ class AgentTasks:
         return GetServerSessionResponse(
             session_id=session_id,
         )
+
+    async def list_resources_task(self, request: ListResourcesRequest):
+        """
+        List resources for an agent.
+        """
+        agent_name = request.agent_name
+        server_name = request.server_name
+
+        aggregator = self.server_aggregators_for_agent.get(agent_name)
+        if not aggregator:
+            raise ValueError(f"Server aggregator for agent '{agent_name}' not found")
+
+        return await aggregator.list_resources(server_name=server_name)
+
+    async def read_resource_task(self, request: ReadResourceRequest):
+        """
+        Read a resource for an agent.
+        """
+        agent_name = request.agent_name
+        uri = request.uri
+        server_name = request.server_name
+
+        aggregator = self.server_aggregators_for_agent.get(agent_name)
+        if not aggregator:
+            raise ValueError(f"Server aggregator for agent '{agent_name}' not found")
+
+        return await aggregator.read_resource(uri=uri, server_name=server_name)

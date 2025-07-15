@@ -143,8 +143,7 @@ async def example_usage():
         task = """Load the student's short story from short_story.md, 
         and generate a report with feedback across proofreading, 
         factuality/logical consistency and style adherence. Use the style rules from 
-        https://apastyle.apa.org/learn/quick-guide-on-formatting and 
-        https://apastyle.apa.org/learn/quick-guide-on-references.
+        https://owl.purdue.edu/owl/research_and_citation/apa_style/apa_formatting_and_style_guide/general_format.html.
         Write the graded report to graded_report.md in the same directory as short_story.md"""
 
         orchestrator = Orchestrator(

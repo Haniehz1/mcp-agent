@@ -108,12 +108,11 @@ class MCPSettings(BaseModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
 
-class AnthropicSettings(BaseModel):
-    """
-    Settings for using Anthropic models in the MCP Agent application.
-    """
+class VertexAISettings(BaseModel):
+    """Settings for using VertexAI models in the MCP Agent application"""
 
-    api_key: str | None = None
+    project: str | None = None
+    location: str | None = None
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
@@ -128,6 +127,18 @@ class BedrockSettings(BaseModel):
     aws_session_token: str | None = None
     aws_region: str | None = None
     profile: str | None = None
+
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+
+class AnthropicSettings(VertexAISettings, BedrockSettings):
+    """
+    Settings for using Anthropic models in the MCP Agent application.
+    """
+
+    api_key: str | None = None
+    default_model: str | None = None
+    provider: Literal["anthropic", "bedrock", "vertexai"] = "anthropic"
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
@@ -149,8 +160,11 @@ class OpenAISettings(BaseModel):
 
     api_key: str | None = None
     reasoning_effort: Literal["low", "medium", "high"] = "medium"
-
     base_url: str | None = None
+    user: str | None = None
+
+    default_headers: Dict[str, str] | None = None
+    default_model: str | None = None
 
     # NOTE: An http_client can be programmatically specified
     # and will be used by the OpenAI client. However, since it is
@@ -158,10 +172,6 @@ class OpenAISettings(BaseModel):
     # http_client: Client | None = None
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
-
-    user: str | None = None
-
-    default_headers: Dict[str, str] | None = None
 
 
 class AzureSettings(BaseModel):
@@ -204,9 +214,10 @@ class TemporalSettings(BaseModel):
 
     host: str
     namespace: str = "default"
+    api_key: str | None = None
+    tls: bool = False
     task_queue: str
     max_concurrent_activities: int | None = None
-    api_key: str | None = None
     timeout_seconds: int | None = 60
 
 
@@ -276,10 +287,17 @@ class OpenTelemetrySettings(BaseModel):
     otlp_settings: TraceOTLPSettings | None = None
     """OTLP settings for OpenTelemetry tracing. Required if using otlp exporter."""
 
+    path: str | None = None
+    """
+    Direct path for trace file. If specified, this takes precedence over path_settings.
+    Useful for test scenarios where you want full control over the trace file location.
+    """
+
     # Settings for advanced trace path configuration for file exporter
     path_settings: TracePathSettings | None = None
     """
     Save trace files with more advanced path semantics, like having timestamps or session id in the trace name.
+    Ignored if 'path' is specified.
     """
 
 

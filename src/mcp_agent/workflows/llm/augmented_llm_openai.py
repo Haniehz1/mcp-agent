@@ -11,6 +11,7 @@ from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartRefusalParam,
     ChatCompletionMessage,
     ChatCompletionMessageParam,
@@ -48,9 +49,11 @@ from mcp_agent.tracing.semconv import (
 )
 from mcp_agent.tracing.telemetry import is_otel_serializable
 from mcp_agent.utils.common import ensure_serializable, typed_dict_extras
+from mcp_agent.utils.mime_utils import image_url_to_mime_and_base64
 from mcp_agent.utils.pydantic_type_serializer import serialize_model, deserialize_model
 from mcp_agent.workflows.llm.augmented_llm import (
     AugmentedLLM,
+    MessageTypes,
     ModelT,
     MCPMessageParam,
     MCPMessageResult,
@@ -58,6 +61,7 @@ from mcp_agent.workflows.llm.augmented_llm import (
     RequestParams,
 )
 from mcp_agent.logging.logger import get_logger
+from mcp_agent.workflows.llm.multipart_converter_openai import OpenAIConverter
 
 
 class RequestCompletionRequest(BaseModel):
@@ -71,6 +75,7 @@ class RequestStructuredCompletionRequest(BaseModel):
     serialized_response_model: str | None = None
     response_str: str
     model: str
+    user: str | None = None
 
 
 class OpenAIAugmentedLLM(
@@ -108,7 +113,7 @@ class OpenAIAugmentedLLM(
             if hasattr(self.context.config.openai, "reasoning_effort"):
                 self._reasoning_effort = self.context.config.openai.reasoning_effort
 
-        self._reasoning = lambda model: model.startswith(("o1", "o3", "o4"))
+        self._reasoning = lambda model: model and model.startswith(("o1", "o3", "o4"))
 
         if self._reasoning(default_model):
             self.logger.info(
@@ -143,7 +148,11 @@ class OpenAIAugmentedLLM(
 
         return ChatCompletionAssistantMessageParam(**assistant_message_params)
 
-    async def generate(self, message, request_params: RequestParams | None = None):
+    async def generate(
+        self,
+        message,
+        request_params: RequestParams | None = None,
+    ):
         """
         Process a query using an LLM and available tools.
         The default implementation uses OpenAI's ChatCompletion as the LLM.
@@ -173,15 +182,7 @@ class OpenAIAugmentedLLM(
                         role="system", content=system_prompt
                     )
                 )
-
-            if isinstance(message, str):
-                messages.append(
-                    ChatCompletionUserMessageParam(role="user", content=message)
-                )
-            elif isinstance(message, list):
-                messages.extend(message)
-            else:
-                messages.append(message)
+            messages.extend((OpenAIConverter.convert_mixed_messages_to_openai(message)))
 
             response: ListToolsResult = await self.agent.list_tools()
             available_tools: List[ChatCompletionToolParam] = [
@@ -210,6 +211,12 @@ class OpenAIAugmentedLLM(
             if model:
                 span.set_attribute(GEN_AI_REQUEST_MODEL, model)
 
+            # prefer user from the request params,
+            # otherwise use the default from the config
+            user = params.user or getattr(self.context.config.openai, "user", None)
+            if self.context.tracing_enabled and user:
+                span.set_attribute("user", user)
+
             total_input_tokens = 0
             total_output_tokens = 0
             finish_reasons = []
@@ -218,12 +225,15 @@ class OpenAIAugmentedLLM(
                 arguments = {
                     "model": model,
                     "messages": messages,
-                    "stop": params.stopSequences,
                     "tools": available_tools,
                 }
-                user_value = getattr(self.context.config.openai, "user", None)
-                if user_value:
-                    arguments["user"] = user_value
+
+                if user:
+                    arguments["user"] = user
+
+                if params.stopSequences is not None:
+                    arguments["stop"] = params.stopSequences
+
                 if self._reasoning(model):
                     arguments = {
                         **arguments,
@@ -449,6 +459,8 @@ class OpenAIAugmentedLLM(
                     serialized_response_model=serialized_response_model,
                     response_str=response,
                     model=model,
+                    user=params.user
+                    or getattr(self.context.config.openai, "user", None),
                 ),
             )
             # TODO: saqadri (MAC) - fix request_structured_completion_task to return ensure_serializable
@@ -551,18 +563,23 @@ class OpenAIAugmentedLLM(
 
         return str(message)
 
-    def message_str(self, message: ChatCompletionMessage) -> str:
+    def message_str(
+        self, message: ChatCompletionMessage, content_only: bool = False
+    ) -> str:
         """Convert an output message to a string representation."""
         content = message.content
         if content:
             return content
+        elif content_only:
+            # If content_only is True, return empty string if no content
+            return ""
 
         return str(message)
 
     def _annotate_span_for_generation_message(
         self,
         span: trace.Span,
-        message: ChatCompletionMessageParam | str | List[ChatCompletionMessageParam],
+        message: MessageTypes,
     ) -> None:
         """Annotate the span with the message content."""
         if not self.context.tracing_enabled:
@@ -885,6 +902,9 @@ class OpenAICompletionTasks:
                 http_client=request.config.http_client
                 if hasattr(request.config, "http_client")
                 else None,
+                default_headers=request.config.default_headers
+                if hasattr(request.config, "default_headers")
+                else None,
             ),
             mode=instructor.Mode.TOOLS_STRICT,
         )
@@ -897,6 +917,7 @@ class OpenAICompletionTasks:
                 messages=[
                     {"role": "user", "content": request.response_str},
                 ],
+                user=request.user,
             )
         except InstructorRetryException:
             # Retry the request with JSON mode
@@ -906,6 +927,9 @@ class OpenAICompletionTasks:
                     base_url=request.config.base_url,
                     http_client=request.config.http_client
                     if hasattr(request.config, "http_client")
+                    else None,
+                    default_headers=request.config.default_headers
+                    if hasattr(request.config, "default_headers")
                     else None,
                 ),
                 mode=instructor.Mode.JSON,
@@ -917,6 +941,7 @@ class OpenAICompletionTasks:
                 messages=[
                     {"role": "user", "content": request.response_str},
                 ],
+                user=request.user,
             )
 
         return structured_response
@@ -1037,9 +1062,8 @@ def mcp_content_to_openai_content_part(
     if isinstance(content, TextContent):
         return ChatCompletionContentPartTextParam(type="text", text=content.text)
     elif isinstance(content, ImageContent):
-        # Best effort to convert an image to text
-        return ChatCompletionContentPartTextParam(
-            type="text", text=f"{content.mimeType}:{content.data}"
+        return ChatCompletionContentPartImageParam(
+            type="image_url", image_url=f"data:{content.mimeType};base64,{content.data}"
         )
     elif isinstance(content, EmbeddedResource):
         if isinstance(content.resource, TextResourceContents):
@@ -1047,9 +1071,19 @@ def mcp_content_to_openai_content_part(
                 type="text", text=content.resource.text
             )
         else:  # BlobResourceContents
-            return ChatCompletionContentPartTextParam(
-                type="text", text=f"{content.resource.mimeType}:{content.resource.blob}"
-            )
+            if content.resource.mimeType and content.resource.mimeType.startswith(
+                "image/"
+            ):
+                return ChatCompletionContentPartImageParam(
+                    type="image_url",
+                    image_url=f"data:{content.resource.mimeType};base64,{content.resource.blob}",
+                )
+            else:
+                # Best effort if mime type is unknown
+                return ChatCompletionContentPartTextParam(
+                    type="text",
+                    text=f"{content.resource.mimeType}:{content.resource.blob}",
+                )
     else:
         # Last effort to convert the content to a string
         return ChatCompletionContentPartTextParam(type="text", text=str(content))
@@ -1066,36 +1100,44 @@ def openai_content_to_mcp_content(
     else:
         # TODO: saqadri - this is a best effort conversion, we should handle all possible content types
         for c in content:
-            if c.type == "text":  # isinstance(c, ChatCompletionContentPartTextParam):
+            if (
+                c["type"] == "text"
+            ):  # isinstance(c, ChatCompletionContentPartTextParam):
                 mcp_content.append(
                     TextContent(
-                        type="text", text=c.text, **typed_dict_extras(c, ["text"])
+                        type="text", text=c["text"], **typed_dict_extras(c, ["text"])
                     )
                 )
             elif (
-                c.type == "image_url"
+                c["type"] == "image_url"
             ):  # isinstance(c, ChatCompletionContentPartImageParam):
-                raise NotImplementedError("Image content conversion not implemented")
-                # TODO: saqadri - need to download the image into a base64-encoded string
-                # Download image from c.image_url
-                # return ImageContent(
-                #     type="image",
-                #     data=downloaded_image,
-                #     **c
-                # )
+                if c["image_url"].startswith("data:"):
+                    mime_type, base64_data = image_url_to_mime_and_base64(
+                        c["image_url"]
+                    )
+                    mcp_content.append(
+                        ImageContent(type="image", data=base64_data, mimeType=mime_type)
+                    )
+                else:
+                    # TODO: saqadri - need to download the image into a base64-encoded string
+                    raise NotImplementedError(
+                        "Image content conversion not implemented"
+                    )
             elif (
-                c.type == "input_audio"
+                c["type"] == "input_audio"
             ):  # isinstance(c, ChatCompletionContentPartInputAudioParam):
                 raise NotImplementedError("Audio content conversion not implemented")
             elif (
-                c.type == "refusal"
+                c["type"] == "refusal"
             ):  # isinstance(c, ChatCompletionContentPartRefusalParam):
                 mcp_content.append(
                     TextContent(
-                        type="text", text=c.refusal, **typed_dict_extras(c, ["refusal"])
+                        type="text",
+                        text=c["refusal"],
+                        **typed_dict_extras(c, ["refusal"]),
                     )
                 )
             else:
-                raise ValueError(f"Unexpected content type: {c.type}")
+                raise ValueError(f"Unexpected content type: {c['type']}")
 
     return mcp_content

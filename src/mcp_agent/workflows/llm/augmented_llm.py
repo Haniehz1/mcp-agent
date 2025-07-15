@@ -22,6 +22,7 @@ from mcp.types import (
     CreateMessageResult,
     SamplingMessage,
     TextContent,
+    PromptMessage,
 )
 
 from mcp_agent.core.context_dependent import ContextDependent
@@ -59,6 +60,10 @@ ModelT = TypeVar("ModelT")
 # TODO: saqadri - SamplingMessage is fairly limiting - consider extending
 MCPMessageParam = SamplingMessage
 MCPMessageResult = CreateMessageResult
+
+# Accepted message types for the AugmentedLLM generation methods.
+Message = Union[str, MessageParamT, PromptMessage]
+MessageTypes = Union[Message, List[Message]]
 
 
 class Memory(BaseModel, Generic[MessageParamT]):
@@ -152,27 +157,33 @@ class RequestParams(CreateMessageRequestParams):
     The likelihood of the model selecting higher-probability options while generating a response.
     """
 
+    user: str | None = None
+    """
+    The user to use for the LLM generation.
+    This is used to stably identify the user in the LLM provider's logs.
+    """
+
 
 class AugmentedLLMProtocol(Protocol, Generic[MessageParamT, MessageT]):
     """Protocol defining the interface for augmented LLMs"""
 
     async def generate(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         request_params: RequestParams | None = None,
     ) -> List[MessageT]:
         """Request an LLM generation, which may run multiple iterations, and return the result"""
 
     async def generate_str(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         request_params: RequestParams | None = None,
     ) -> str:
         """Request an LLM generation and return the string representation of the result"""
 
     async def generate_structured(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         response_model: Type[ModelT],
         request_params: RequestParams | None = None,
     ) -> ModelT:
@@ -277,7 +288,7 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
     @abstractmethod
     async def generate(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         request_params: RequestParams | None = None,
     ) -> List[MessageT]:
         """Request an LLM generation, which may run multiple iterations, and return the result"""
@@ -285,7 +296,7 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
     @abstractmethod
     async def generate_str(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         request_params: RequestParams | None = None,
     ) -> str:
         """Request an LLM generation and return the string representation of the result"""
@@ -293,7 +304,7 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
     @abstractmethod
     async def generate_structured(
         self,
-        message: str | MessageParamT | List[MessageParamT],
+        message: MessageTypes,
         response_model: Type[ModelT],
         request_params: RequestParams | None = None,
     ) -> ModelT:
@@ -504,7 +515,7 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
         """Convert an input message to a string representation."""
         return str(message)
 
-    def message_str(self, message: MessageT) -> str:
+    def message_str(self, message: MessageT, content_only: bool = False) -> str:
         """Convert an output message to a string representation."""
         return str(message)
 
@@ -530,18 +541,27 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
         span: trace.Span, request_params: RequestParams
     ):
         """Annotate the span with request parameters"""
-        span.set_attribute(GEN_AI_REQUEST_MAX_TOKENS, request_params.maxTokens)
-        span.set_attribute(
-            "request_params.max_iterations", request_params.max_iterations
-        )
-        span.set_attribute(GEN_AI_REQUEST_TEMPERATURE, request_params.temperature)
-        span.set_attribute("request_params.use_history", request_params.use_history)
-        span.set_attribute(
-            "request_params.parallel_tool_calls", request_params.parallel_tool_calls
-        )
-        if request_params.model:
+        # Handle case where request_params might not be a proper RequestParams object
+        if hasattr(request_params, "maxTokens"):
+            span.set_attribute(GEN_AI_REQUEST_MAX_TOKENS, request_params.maxTokens)
+        if hasattr(request_params, "max_iterations"):
+            span.set_attribute(
+                "request_params.max_iterations", request_params.max_iterations
+            )
+        if hasattr(request_params, "temperature"):
+            span.set_attribute(GEN_AI_REQUEST_TEMPERATURE, request_params.temperature)
+        if hasattr(request_params, "use_history"):
+            span.set_attribute("request_params.use_history", request_params.use_history)
+        if hasattr(request_params, "parallel_tool_calls"):
+            span.set_attribute(
+                "request_params.parallel_tool_calls", request_params.parallel_tool_calls
+            )
+        if hasattr(request_params, "model") and request_params.model:
             span.set_attribute(GEN_AI_REQUEST_MODEL, request_params.model)
-        if request_params.modelPreferences:
+        if (
+            hasattr(request_params, "modelPreferences")
+            and request_params.modelPreferences
+        ):
             for attr, value in request_params.modelPreferences.model_dump(
                 exclude_unset=True
             ).items():
@@ -554,21 +574,21 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
                     record_attribute(
                         span, f"request_params.modelPreferences.{attr}", value
                     )
-        if request_params.systemPrompt:
+        if hasattr(request_params, "systemPrompt") and request_params.systemPrompt:
             span.set_attribute(
                 "request_params.systemPrompt", request_params.systemPrompt
             )
-        if request_params.includeContext:
+        if hasattr(request_params, "includeContext") and request_params.includeContext:
             span.set_attribute(
                 "request_params.includeContext",
                 request_params.includeContext,
             )
-        if request_params.stopSequences:
+        if hasattr(request_params, "stopSequences") and request_params.stopSequences:
             span.set_attribute(
                 GEN_AI_REQUEST_STOP_SEQUENCES,
                 request_params.stopSequences,
             )
-        if request_params.metadata:
+        if hasattr(request_params, "metadata") and request_params.metadata:
             record_attributes(span, request_params.metadata, "request_params.metadata")
 
     def _annotate_span_for_generation_message(
@@ -584,15 +604,12 @@ class AugmentedLLM(ContextDependent, AugmentedLLMProtocol[MessageParamT, Message
             span.set_attribute("message.content", message)
         elif isinstance(message, list):
             for i, msg in enumerate(message):
-                attributes = self._extract_message_param_attributes_for_tracing(
-                    msg, prefix=f"message.{i}"
-                )
-                span.set_attributes(attributes)
+                if isinstance(msg, str):
+                    span.set_attribute(f"message.{i}", msg)
+                else:
+                    span.set_attribute(f"message.{i}.content", str(msg))
         else:
-            attributes = self._extract_message_param_attributes_for_tracing(
-                message, prefix="message"
-            )
-            span.set_attributes(attributes)
+            span.set_attribute("message", str(message))
 
     def _extract_message_param_attributes_for_tracing(
         self, message_param: MessageParamT, prefix: str = "message"

@@ -924,24 +924,6 @@ async def main():
             print(result)
 ```
 
-### Decorator Style Agent
-
-```python
-from mcp_agent.core.decorator_app import MCPAgentDecorator
-
-agent_app = MCPAgentDecorator("my-app")
-
-@agent_app.agent(
-    name="basic_agent",
-    instruction="A simple agent that helps with basic tasks",
-    servers=["filesystem"]
-)
-async def main():
-    async with agent_app.run() as agent:
-        result = await agent.send("basic_agent", "What files are here?")
-        print(result)
-```
-
 ### Router-Based Workflow
 
 ```python
@@ -1777,67 +1759,6 @@ Provides both global fallback and instance-specific context support.
   - `self`
   - `context` ('Context')
 
-### src/mcp_agent/core/decorator_app.py
-
-**Module Description**: Decorator-based interface for MCP Agent applications. Provides a simplified way to create and manage agents using decorators.
-
-**Class: `MCPAgentDecorator`**
-- **Description**: A decorator-based interface for MCP Agent applications.
-Provides a simplified way to create and manage agents using decorators.
-
-**Class: `AgentAppWrapper`**
-- **Description**: Wrapper class providing a simplified interface to the agent application.
-
-**Function:** `MCPAgentDecorator.__init__(self, name: str, config_path: Optional[str] = None)`
-
-- **Description**: Initialize the decorator interface. Args: name: Name of the application config_path: Optional path to config file
-- **Parameters**
-  - `self`
-  - `name` (str): Name of the application
-  - `config_path` (Optional[str], optional): Optional path to config file
-
-**Function:** `MCPAgentDecorator._load_config(self)`
-
-- **Description**: Load configuration, properly handling YAML without dotenv processing
-- **Parameters**
-  - `self`
-
-**Function:** `MCPAgentDecorator.agent(self, name: str, instruction: str, servers: List[str]) -> Callable`
-
-- **Description**: Decorator to create and register an agent. Args: name: Name of the agent instruction: Base instruction for the agent servers: List of server names the agent should connect to
-- **Parameters**
-  - `self`
-  - `name` (str): Name of the agent
-  - `instruction` (str): Base instruction for the agent
-  - `servers` (List[str]): List of server names the agent should connect to
-- **Returns**
-  - `Callable`: Return value
-
-**Function:** `MCPAgentDecorator.decorator(func: Callable) -> Callable`
-
-
-**Function:** `MCPAgentDecorator.wrapper()`
-
-
-**Function:** `MCPAgentDecorator.run(self)`
-
-- **Description**: Context manager for running the application. Handles setup and teardown of the app and agents.
-- **Parameters**
-  - `self`
-
-**Function:** `AgentAppWrapper.__init__(self, app: MCPApp, agents: Dict[str, Agent])`
-
-
-**Function:** `AgentAppWrapper.send(self, agent_name: str, message: str) -> Any`
-
-- **Description**: Send a message to a specific agent and get the response. Args: agent_name: Name of the agent to send message to message: Message to send Returns: Agent's response
-- **Parameters**
-  - `self`
-  - `agent_name` (str): Name of the agent to send message to
-  - `message` (str): Message to send
-- **Returns**
-  - `Any`: Agent's response
-
 ### src/mcp_agent/core/exceptions.py
 
 **Module Description**: Custom exceptions for the mcp-agent library. Enables user-friendly error handling for common issues.
@@ -2611,13 +2532,13 @@ Some key notes:
 - **Parameters**
   - `self`
 
-**Function:** `Workflow.run_async(self) -> str`
+**Function:** `Workflow.run_async(self) -> WorkflowExecution`
 
-- **Description**: Run the workflow asynchronously and return a workflow ID. This creates an async task that will be executed through the executor and returns immediately with a workflow run ID that can be used to check status, resume, or cancel. Args: *args: Positional arguments to pass to the run method **kwargs: Keyword arguments to pass to the run method Returns: str: A unique workflow ID that can be used to reference this workflow instance
+- **Description**: Run the workflow asynchronously and return the WorkflowExecution. This creates an async task that will be executed through the executor and returns immediately with a WorkflowExecution with run ID that can be used to check status, resume, or cancel. Args: *args: Positional arguments to pass to the run method **kwargs: Keyword arguments to pass to the run method Returns: str: A unique workflow ID that can be used to reference this workflow instance
 - **Parameters**
   - `self`
 - **Returns**
-  - `str`: str: A unique workflow ID that can be used to reference this workflow instance
+  - `WorkflowExecution`: WorkflowExecution: The execution details including run ID and workflow ID
 
 **Function:** `Workflow._execute_workflow()`
 
@@ -7405,4 +7326,3 @@ using Anthropic's API as the LLM.
 - **Description**: MCP version of the OpenAI Swarm class (https://github.com/openai/swarm.), using OpenAI's ChatCompletion as the LLM.
 
 **Function:** `OpenAISwarm.generate(self, message, request_params: RequestParams | None = None)`
-

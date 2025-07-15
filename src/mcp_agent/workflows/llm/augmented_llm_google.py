@@ -29,6 +29,7 @@ from mcp_agent.workflows.llm.augmented_llm import (
     RequestParams,
     CallToolResult,
 )
+from mcp_agent.workflows.llm.multipart_converter_google import GoogleConverter
 
 
 class GoogleAugmentedLLM(
@@ -84,14 +85,7 @@ class GoogleAugmentedLLM(
         if params.use_history:
             messages.extend(self.history.get())
 
-        if isinstance(message, str):
-            messages.append(
-                types.Content(role="user", parts=[types.Part.from_text(text=message)])
-            )
-        elif isinstance(message, list):
-            messages.extend(message)
-        else:
-            messages.append(message)
+        messages.extend(GoogleConverter.convert_mixed_messages_to_google(message))
 
         response = await self.agent.list_tools()
 
@@ -171,20 +165,36 @@ class GoogleAugmentedLLM(
             ]
 
             if function_calls:
-                results = await self.executor.execute_many(function_calls)
+                results: list[
+                    types.Content | BaseException | None
+                ] = await self.executor.execute_many(function_calls)
 
                 self.logger.debug(
                     f"Iteration {i}: Tool call results: {str(results) if results else 'None'}"
                 )
 
+                function_response_parts: list[types.Part] = []
                 for result in results:
-                    if isinstance(result, BaseException):
+                    if (
+                        result
+                        and not isinstance(result, BaseException)
+                        and result.parts
+                    ):
+                        function_response_parts.extend(result.parts)
+                    else:
                         self.logger.error(
-                            f"Warning: Unexpected error during tool execution: {result}. Continuing.."
+                            f"Warning: Unexpected error during tool execution: {result}. Continuing..."
                         )
-                        break
-                    if result is not None:
-                        messages.append(result)
+                        function_response_parts.append(
+                            types.Part.from_text(text=f"Error executing tool: {result}")
+                        )
+
+                # Combine all parallel function responses into a single message
+                if function_response_parts:
+                    function_response_content = types.Content(
+                        role="tool", parts=function_response_parts
+                    )
+                    messages.append(function_response_content)
             else:
                 self.logger.debug(
                     f"Iteration {i}: Stopping because finish_reason is '{candidate.finish_reason}'"
@@ -304,7 +314,7 @@ class GoogleAugmentedLLM(
         # TODO: Jerron - to make more comprehensive
         return str(message.model_dump())
 
-    def message_str(self, message) -> str:
+    def message_str(self, message, content_only: bool = False) -> str:
         """Convert an output message to a string representation."""
         # TODO: Jerron - to make more comprehensive
         return str(message.model_dump())
@@ -514,7 +524,7 @@ def transform_mcp_tool_schema(schema: dict) -> dict:
 
     Key transformations:
     1. Convert camelCase properties to snake_case (e.g., maxLength -> max_length)
-    2. Remove explicitly excluded fields (e.g., "default")
+    2. Remove explicitly excluded fields (e.g., "default", "additionalProperties")
     3. Recursively process nested structures (properties, items, anyOf)
     4. Handle nullable types by setting nullable=true when anyOf includes type:"null"
     5. Remove unsupported format values based on data type
@@ -539,7 +549,8 @@ def transform_mcp_tool_schema(schema: dict) -> dict:
 
     # Properties to exclude even if they would otherwise be supported
     # 'default' is excluded because Google throws error if included.
-    EXCLUDED_PROPERTIES = {"default"}
+    # 'additionalProperties' is excluded because Google throws an "Unknown name" error.
+    EXCLUDED_PROPERTIES = {"default", "additionalProperties"}
 
     # Special case mappings for camelCase to snake_case conversions
     CAMEL_TO_SNAKE_MAPPINGS = {

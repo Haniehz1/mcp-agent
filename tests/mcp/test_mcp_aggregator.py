@@ -169,32 +169,32 @@ async def test_mcp_aggregator_parse_capability_name():
     }
 
     # Namespaced tool
-    server, local = aggregator._parse_capability_name("srv1_toolA", "tool")
+    server, local = await aggregator._parse_capability_name("srv1_toolA", "tool")
     assert server == "srv1"
     assert local == "toolA"
 
     # Non-namespaced tool
-    server, local = aggregator._parse_capability_name("toolA", "tool")
+    server, local = await aggregator._parse_capability_name("toolA", "tool")
     assert server == "srv1"
     assert local == "toolA"
 
     # Non-existent tool
-    server, local = aggregator._parse_capability_name("notfound", "tool")
+    server, local = await aggregator._parse_capability_name("notfound", "tool")
     assert server is None
     assert local is None
 
     # Namespaced prompt
-    server, local = aggregator._parse_capability_name("srv1_promptA", "prompt")
+    server, local = await aggregator._parse_capability_name("srv1_promptA", "prompt")
     assert server == "srv1"
     assert local == "promptA"
 
     # Non-namespaced prompt
-    server, local = aggregator._parse_capability_name("promptA", "prompt")
+    server, local = await aggregator._parse_capability_name("promptA", "prompt")
     assert server == "srv1"
     assert local == "promptA"
 
     # Non-existent prompt
-    server, local = aggregator._parse_capability_name("notfound", "prompt")
+    server, local = await aggregator._parse_capability_name("notfound", "prompt")
     assert server is None
     assert local is None
 
@@ -227,7 +227,10 @@ async def test_mcp_aggregator_call_tool_persistent(monkeypatch):
     }
 
     # Patch _parse_capability_name to always return ("srv1", "toolA")
-    aggregator._parse_capability_name = lambda name, cap: ("srv1", "toolA")
+    async def mock_parse(name, cap):
+        return ("srv1", "toolA")
+
+    aggregator._parse_capability_name = mock_parse
 
     # Mock persistent connection manager and client session
     class DummySession:
@@ -295,7 +298,10 @@ async def test_mcp_aggregator_call_tool_nonpersistent(monkeypatch):
     }
 
     # Patch _parse_capability_name to always return ("srv1", "toolA")
-    aggregator._parse_capability_name = lambda name, cap: ("srv1", "toolA")
+    async def mock_parse_nonpersistent(name, cap):
+        return ("srv1", "toolA")
+
+    aggregator._parse_capability_name = mock_parse_nonpersistent
 
     # Patch the *server_registry* so the non-persistent path receives
     # a session with the expected `call_tool` coroutine.
@@ -321,7 +327,10 @@ async def test_mcp_aggregator_call_tool_errors(monkeypatch):
 
     # --- Tool not found case ---
     # Patch _parse_capability_name to return (None, None)
-    aggregator._parse_capability_name = lambda name, cap: (None, None)
+    async def mock_parse_none(name, cap):
+        return (None, None)
+
+    aggregator._parse_capability_name = mock_parse_none
 
     result = await aggregator.call_tool("nonexistent_tool", arguments={})
     assert result.isError is True
@@ -329,7 +338,10 @@ async def test_mcp_aggregator_call_tool_errors(monkeypatch):
 
     # --- Exception during tool call ---
     # Patch _parse_capability_name to return a valid tool
-    aggregator._parse_capability_name = lambda name, cap: ("srv1", "toolA")
+    async def mock_parse_valid(name, cap):
+        return ("srv1", "toolA")
+
+    aggregator._parse_capability_name = mock_parse_valid
     tool = SimpleNamespace()
     tool.name = "toolA"
     aggregator._namespaced_tool_map = {
@@ -391,7 +403,11 @@ async def test_mcp_aggregator_get_prompt(monkeypatch):
             )
         ]
     }
-    aggregator._parse_capability_name = lambda name, cap: ("srv1", "promptA")
+
+    async def mock_parse_prompt(name, cap):
+        return ("srv1", "promptA")
+
+    aggregator._parse_capability_name = mock_parse_prompt
 
     class DummyClient:
         async def get_prompt(self, name, arguments=None):
@@ -422,13 +438,19 @@ async def test_mcp_aggregator_get_prompt(monkeypatch):
     assert result.arguments == {"foo": "bar"}
 
     # --- Prompt not found ---
-    aggregator._parse_capability_name = lambda name, cap: (None, None)
+    async def mock_parse_prompt_none(name, cap):
+        return (None, None)
+
+    aggregator._parse_capability_name = mock_parse_prompt_none
     result = await aggregator.get_prompt("notfound_prompt", arguments={})
     assert result.isError is True
     assert "not found" in result.description
 
     # --- Exception during prompt fetch ---
-    aggregator._parse_capability_name = lambda name, cap: ("srv1", "promptA")
+    async def mock_parse_prompt_error(name, cap):
+        return ("srv1", "promptA")
+
+    aggregator._parse_capability_name = mock_parse_prompt_error
 
     class DummyClientError:
         async def get_prompt(self, name, arguments=None):
@@ -628,47 +650,59 @@ async def test_mcp_aggregator_load_server_and_load_servers(monkeypatch):
     )
     aggregator.initialized = False
 
-    # Patch _fetch_capabilities to return different tools/prompts for each server
-    from mcp.types import Tool, Prompt
+    # Patch _fetch_capabilities to return different tools/prompts/resources for each server
+    from mcp.types import Tool, Prompt, Resource
 
     tool1 = Tool(name="toolA", description="desc", inputSchema={})
     prompt1 = Prompt(name="promptA", description="desc")
+    resource1 = Resource(
+        uri="file://srv1/resourceA", name="resourceA", description="desc"
+    )
     tool2 = Tool(name="toolB", description="desc", inputSchema={})
     prompt2 = Prompt(name="promptB", description="desc")
+    resource2 = Resource(
+        uri="file://srv2/resourceB", name="resourceB", description="desc"
+    )
 
     async def fake_fetch_capabilities(server_name):
         if server_name == "srv1":
-            return ("srv1", [tool1], [prompt1])
+            return ("srv1", [tool1], [prompt1], [resource1])
         elif server_name == "srv2":
-            return ("srv2", [tool2], [prompt2])
+            return ("srv2", [tool2], [prompt2], [resource2])
         else:
             raise ValueError("Unknown server")
 
     monkeypatch.setattr(aggregator, "_fetch_capabilities", fake_fetch_capabilities)
 
     # Test load_server for srv1
-    tools, prompts = await aggregator.load_server("srv1")
+    tools, prompts, resources = await aggregator.load_server("srv1")
     assert len(tools) == 1 and tools[0].name == "toolA"
     assert len(prompts) == 1 and prompts[0].name == "promptA"
+    assert len(resources) == 1 and resources[0].name == "resourceA"
     assert "srv1_toolA" in aggregator._namespaced_tool_map
     assert "srv1_promptA" in aggregator._namespaced_prompt_map
+    assert "srv1_resourceA" in aggregator._namespaced_resource_map
 
     # Test load_servers (should call for both servers)
     aggregator._namespaced_tool_map.clear()
     aggregator._server_to_tool_map.clear()
     aggregator._namespaced_prompt_map.clear()
     aggregator._server_to_prompt_map.clear()
+    aggregator._namespaced_resource_map.clear()
+    aggregator._server_to_resource_map.clear()
     aggregator.initialized = False
     await aggregator.load_servers()
     assert "srv1_toolA" in aggregator._namespaced_tool_map
     assert "srv2_toolB" in aggregator._namespaced_tool_map
+    assert "srv1_resourceA" in aggregator._namespaced_resource_map
+    assert "srv2_resourceB" in aggregator._namespaced_resource_map
     assert "srv1_promptA" in aggregator._namespaced_prompt_map
     assert "srv2_promptB" in aggregator._namespaced_prompt_map
 
     # Error handling: _fetch_capabilities raises for one server
     async def fetch_capabilities_with_error(server_name):
         if server_name == "srv1":
-            return ("srv1", [tool1], [prompt1])
+            return ("srv1", [tool1], [prompt1], [resource1])
         else:
             raise RuntimeError("Simulated error")
 
@@ -727,18 +761,18 @@ async def test_mcp_aggregator_duplicate_tool_names():
     }
 
     # Namespaced lookup
-    server, local = aggregator._parse_capability_name("srv1_toolX", "tool")
+    server, local = await aggregator._parse_capability_name("srv1_toolX", "tool")
     assert server == "srv1" and local == "toolX"
-    server, local = aggregator._parse_capability_name("srv2_toolX", "tool")
+    server, local = await aggregator._parse_capability_name("srv2_toolX", "tool")
     assert server == "srv2" and local == "toolX"
 
     # Non-namespaced lookup should resolve to the first server in the list with that tool
-    server, local = aggregator._parse_capability_name("toolX", "tool")
+    server, local = await aggregator._parse_capability_name("toolX", "tool")
     assert server == "srv1" and local == "toolX"
 
     # If we reverse the server order, should resolve to srv2
     aggregator.server_names = ["srv2", "srv1"]
-    server, local = aggregator._parse_capability_name("toolX", "tool")
+    server, local = await aggregator._parse_capability_name("toolX", "tool")
     assert server == "srv2" and local == "toolX"
 
 

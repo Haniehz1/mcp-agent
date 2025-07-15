@@ -26,6 +26,7 @@ from mcp_agent.workflows.llm.augmented_llm import (
     RequestParams,
 )
 from mcp_agent.logging.logger import get_logger
+from mcp_agent.workflows.llm.multipart_converter_bedrock import BedrockConverter
 
 if TYPE_CHECKING:
     from mypy_boto3_bedrock_runtime.type_defs import (
@@ -69,6 +70,13 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
         if self.context.config.bedrock:
             if hasattr(self.context.config.bedrock, "default_model"):
                 default_model = self.context.config.bedrock.default_model
+        else:
+            self.logger.error(
+                "Bedrock configuration not found. Please provide Bedrock configuration."
+            )
+            raise ValueError(
+                "Bedrock configuration not found. Please provide Bedrock configuration."
+            )
 
         self.default_request_params = self.default_request_params or RequestParams(
             model=default_model,
@@ -93,12 +101,7 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
         if params.use_history:
             messages.extend(self.history.get())
 
-        if isinstance(message, str):
-            messages.append({"role": "user", "content": [{"text": message}]})
-        elif isinstance(message, list):
-            messages.extend(message)
-        else:
-            messages.append(message)
+        messages.extend(BedrockConverter.convert_mixed_messages_to_bedrock(message))
 
         response = await self.agent.list_tools()
 
@@ -203,6 +206,9 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
                 )
                 break
             elif response["stopReason"] == "tool_use":
+                # Collect all tool results first
+                tool_results = []
+
                 for content in response["output"]["message"]["content"]:
                     if content.get("toolUse"):
                         tool_use_block = content["toolUse"]
@@ -221,25 +227,27 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
                             request=tool_call_request, tool_call_id=tool_use_id
                         )
 
-                        tool_result_message = {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "toolResult": {
-                                        "content": mcp_content_to_bedrock_content(
-                                            result.content
-                                        ),
-                                        "toolUseId": tool_use_id,
-                                        "status": "error"
-                                        if result.isError
-                                        else "success",
-                                    }
+                        tool_results.append(
+                            {
+                                "toolResult": {
+                                    "content": mcp_content_to_bedrock_content(
+                                        result.content
+                                    ),
+                                    "toolUseId": tool_use_id,
+                                    "status": "error" if result.isError else "success",
                                 }
-                            ],
-                        }
+                            }
+                        )
 
-                        messages.append(tool_result_message)
-                        responses.append(tool_result_message)
+                # Create a single message with all tool results
+                if tool_results:
+                    tool_result_message = {
+                        "role": "user",
+                        "content": tool_results,
+                    }
+
+                    messages.append(tool_result_message)
+                    responses.append(tool_result_message)
 
         if params.use_history:
             self.history.set(messages)
@@ -328,9 +336,10 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
         """Convert a response object to an input parameter object to allow LLM calls to be chained."""
         return message
 
-    def message_param_str(self, message: MessageUnionTypeDef) -> str:
-        """Convert an input message to a string representation."""
-
+    def message_str(
+        self, message: MessageUnionTypeDef, content_only: bool = False
+    ) -> str:
+        """Convert an output message to a string representation."""
         if message.get("content"):
             final_text: list[str] = []
             for content in message["content"]:
@@ -339,11 +348,11 @@ class BedrockAugmentedLLM(AugmentedLLM[MessageUnionTypeDef, MessageUnionTypeDef]
                 else:
                     final_text.append(str(content))
             return "\n".join(final_text)
-        return str(message)
+        elif content_only:
+            # If content_only is True, return empty string if no content
+            return ""
 
-    def message_str(self, message: MessageUnionTypeDef) -> str:
-        """Convert an output message to a string representation."""
-        return self.message_param_str(message)
+        return str(message)
 
 
 class RequestCompletionRequest(BaseModel):
@@ -377,7 +386,7 @@ class BedrockCompletionTasks:
                 aws_access_key_id=request.config.aws_access_key_id,
                 aws_secret_access_key=request.config.aws_secret_access_key,
                 aws_session_token=request.config.aws_session_token,
-                region_name=request.config.bedrock.aws_region,
+                region_name=request.config.aws_region,
             )
         else:
             session = Session()
@@ -413,7 +422,7 @@ class BedrockCompletionTasks:
                 aws_access_key_id=request.config.aws_access_key_id,
                 aws_secret_access_key=request.config.aws_secret_access_key,
                 aws_session_token=request.config.aws_session_token,
-                region_name=request.config.bedrock.aws_region,
+                region_name=request.config.aws_region,
             )
         else:
             session = Session()
@@ -424,7 +433,7 @@ class BedrockCompletionTasks:
         # Extract structured data from natural language
         structured_response = client.chat.completions.create(
             modelId=request.model,
-            messages=[{"role": "user", "content": [{"text": request.response_str}]}],
+            messages=[{"role": "user", "content": request.response_str}],
             response_model=response_model,
         )
 

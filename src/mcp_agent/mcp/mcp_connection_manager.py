@@ -252,13 +252,19 @@ class MCPConnectionManager(ContextDependent):
 
             # Then close the task group if it's active
             if self._tg_active:
-                await self._tg.__aexit__(exc_type, exc_val, exc_tb)
-                self._tg_active = False
-                self._tg = None
+                try:
+                    await self._tg.__aexit__(exc_type, exc_val, exc_tb)
+                except Exception as e:
+                    logger.warning(
+                        f"MCPConnectionManager: Error during task group cleanup: {e}"
+                    )
+                finally:
+                    self._tg_active = False
+                    self._tg = None
         except AttributeError:  # Handle missing `_exceptions`
             pass
         except Exception as e:
-            logger.error(f"MCPConnectionManager: Error during shutdown: {e}")
+            logger.warning(f"MCPConnectionManager: Error during shutdown: {e}")
 
     async def launch_server(
         self,

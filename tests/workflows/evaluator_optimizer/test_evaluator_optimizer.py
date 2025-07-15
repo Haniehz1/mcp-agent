@@ -18,7 +18,7 @@ class DummyLLM(AugmentedLLM):
         self.history = []
         self._generate_return = ["dummy response"]
         self._generate_structured_return = None
-        self._message_str = lambda r: str(r)
+        self._message_str = lambda r, content_only=False: str(r)
 
     def set_generate_return(self, value):
         self._generate_return = value
@@ -35,12 +35,23 @@ class DummyLLM(AugmentedLLM):
     async def generate_structured(self, message, response_model, request_params=None):
         return self._generate_structured_return
 
-    def message_str(self, r):
-        return self._message_str(r)
+    def message_str(self, message, content_only=False):
+        return self._message_str(message, content_only)
 
     async def generate_str(self, message, request_params=None):
         # Minimal implementation for abstract method
         return "\n".join(self.message_str(r) for r in self._generate_return)
+
+
+class MockToolCallMessage:
+    """Mock message that simulates a tool call message with no content"""
+
+    def __init__(self, has_content=False):
+        self.content = "Some text content" if has_content else None
+        self.tool_calls = ["mock_tool_call"] if not has_content else None
+
+    def __str__(self):
+        return self.content if self.content else "[Tool Call]"
 
 
 @pytest.fixture
@@ -174,11 +185,83 @@ async def test_generate_str_returns_string(mock_optimizer, mock_evaluator):
     )
     # Patch optimizer_llm.generate to return a list of responses
     mock_optimizer.generate = AsyncMock(return_value=["foo", "bar"])
+
     # Patch message_str to join responses
-    mock_optimizer.message_str = MagicMock(side_effect=lambda r: r.upper())
+    def mock_message_str(msg, content_only=False):
+        return msg.upper()
+
+    mock_optimizer.message_str = MagicMock(side_effect=mock_message_str)
     result = await eo.generate_str("Prompt")
     # Should join the responses with newline and apply message_str
     assert result == "FOO\nBAR"
+
+
+@pytest.mark.asyncio
+async def test_generate_str_filters_empty_messages(mock_optimizer, mock_evaluator):
+    """Test that generate_str properly filters out messages with no content (e.g., tool calls)"""
+    eo = EvaluatorOptimizerLLM(
+        optimizer=mock_optimizer,
+        evaluator=mock_evaluator,
+    )
+
+    # Create mock messages: one with content, one without (tool call), one with content
+    message_with_content_1 = MockToolCallMessage(has_content=True)
+    message_with_tool_call = MockToolCallMessage(
+        has_content=False
+    )  # No content, has tool call
+    message_with_content_2 = MockToolCallMessage(has_content=True)
+
+    # Set up the optimizer to return these mixed messages
+    mock_optimizer.generate = AsyncMock(
+        return_value=[
+            message_with_content_1,
+            message_with_tool_call,
+            message_with_content_2,
+        ]
+    )
+
+    # Set up message_str to behave like OpenAI's implementation:
+    # - Return empty string for messages without content
+    # - Return actual content for messages with content
+    def mock_message_str(msg, content_only=False):
+        if hasattr(msg, "content") and msg.content:
+            return msg.content
+        return ""  # Empty string for tool calls or messages without content
+
+    mock_optimizer.message_str = MagicMock(side_effect=mock_message_str)
+
+    result = await eo.generate_str("Test prompt")
+
+    # Should only include messages with content, filtering out empty strings
+    assert result == "Some text content\nSome text content"
+
+    # Verify message_str was called for each message
+    assert mock_optimizer.message_str.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_generate_str_handles_all_empty_messages(mock_optimizer, mock_evaluator):
+    """Test that generate_str handles the case where all messages are empty (all tool calls)"""
+    eo = EvaluatorOptimizerLLM(
+        optimizer=mock_optimizer,
+        evaluator=mock_evaluator,
+    )
+
+    # Create mock messages that are all tool calls (no content)
+    tool_call_messages = [MockToolCallMessage(has_content=False) for _ in range(3)]
+
+    mock_optimizer.generate = AsyncMock(return_value=tool_call_messages)
+
+    # Mock message_str to return empty strings for tool calls
+    def mock_empty_message_str(msg, content_only=False):
+        return ""
+
+    mock_optimizer.message_str = MagicMock(side_effect=mock_empty_message_str)
+
+    result = await eo.generate_str("Test prompt")
+
+    # Should return empty string when all messages are filtered out
+    assert result == ""
 
 
 @pytest.mark.asyncio
